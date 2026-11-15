@@ -38,6 +38,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.process_going(process);
         self.context_processes.retain(|_, owner| *owner != process);
         self.reservations.retain(|&(owner, _), _| owner != process);
+        self.described_surfaces.remove(&process);
+        if self.newest_description.is_some_and(|(owner, _, _)| owner == process) {
+            self.newest_description = None;
+        }
+        self.surface_range_sizes.retain(|&(owner, _), _| owner != process);
         self.backend.process_gone(process);
         if let Some(space) = self.spaces.remove(&process) {
             let action = DeferredAction::CloseSpace(space);
