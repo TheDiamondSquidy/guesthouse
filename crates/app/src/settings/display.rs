@@ -26,6 +26,8 @@ const DRIVER_IN: &str = "In Windows. It was signed on this machine with a certif
 const DRIVER_NEXT: &str = "Goes into Windows by itself at the next start. It's signed there with a certificate \
                            made for this machine, which Windows then trusts as a root. Its private key is deleted \
                            before the install.";
+const DIRECT_NOTE: &str = "Hands the guest's frames to your desktop as they are, so they can reach the display \
+                           sooner, and HDR can where the desktop shows it. Turn it off if the picture goes wrong.";
 const DRIVER_NONE: &str = "This build has no display driver, so Windows stays on its basic display.";
 
 struct Parts {
@@ -107,6 +109,17 @@ impl Display {
             saving.save();
         });
         group.add(&overlay);
+        let direct = adw::SwitchRow::builder()
+            .title("Direct frames")
+            .active(shared.machine.borrow().direct_frames())
+            .subtitle(DIRECT_NOTE)
+            .build();
+        let saving = shared.clone();
+        direct.connect_active_notify(move |row| {
+            saving.machine.borrow_mut().direct_frames_off = !row.is_active();
+            saving.save();
+        });
+        group.add(&direct);
     }
 
     fn connect(&self) {
@@ -232,7 +245,8 @@ impl Display {
             RATE_NOTE.to_owned()
         };
         parts.rate.set_subtitle(&note);
-        parts.hdr.set_subtitle(screen_hdr(&context).sdr_reason().unwrap_or(HDR_NOTE));
+        let direct = parts.shared.machine.borrow().direct_frames();
+        parts.hdr.set_subtitle(screen_hdr(&context).sdr_reason(direct).unwrap_or(HDR_NOTE));
         let package = DriverPackage::find(&context);
         parts.driver.set_subtitle(&self.driver_note(&state, package.is_some()));
         let missing = state.driver != Driver::Installed && package.is_some();
