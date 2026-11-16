@@ -185,8 +185,7 @@ pub(crate) fn l2_invalidate_words() -> Vec<u32> {
 
 /// After scheduling and before any work, as this can force a channel off the GPU. The channel runs
 /// fine on the RM's own slice, so a refusal only costs some speed.
-fn set_timeslice<R: Rm>(device: &mut Device<R>, group: Handle) {
-    let micros = device.graphics_timeslice_micros;
+fn set_timeslice<R: Rm>(device: &mut Device<R>, group: Handle, micros: u64) {
     if micros != 0
         && let Err(error) = device.control(group, CONTROL_SET_TIMESLICE, &mut micros.to_le_bytes())
     {
@@ -257,7 +256,7 @@ impl Channel {
         let mut schedule = SCHEDULE_ENABLED;
         device.control(group, CONTROL_SCHEDULE_CHANNEL_GROUP, &mut schedule)?;
         if engine == Engine::Graphics {
-            set_timeslice(device, group);
+            set_timeslice(device, group, device.graphics_timeslice_micros);
         }
 
         let first = match engine {
@@ -288,6 +287,12 @@ impl Channel {
             local_memory: None,
             late_pool_words: None,
         })
+    }
+
+    /// A slice of its own for this channel's group. Only before the channel has been given work, as
+    /// for the slice set when it was made.
+    pub fn set_timeslice<R: Rm>(&self, device: &mut Device<R>, micros: u64) {
+        set_timeslice(device, self.group, micros);
     }
 
     /// Maps a shader local-memory pool and names it in the prelude, ahead of the cache invalidate.
@@ -763,6 +768,14 @@ mod tests {
         let (mut device, space) = device();
         channel(&mut device, &space, Engine::Graphics);
         assert!(timeslices_asked_for(&device).is_empty());
+    }
+
+    #[test]
+    fn a_channel_can_be_given_a_slice_of_its_own_once_made() {
+        let (mut device, space) = device();
+        let channel = channel(&mut device, &space, Engine::Graphics);
+        channel.set_timeslice(&mut device, 250);
+        assert_eq!(timeslices_asked_for(&device), [250]);
     }
 
     #[test]

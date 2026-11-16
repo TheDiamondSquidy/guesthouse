@@ -130,9 +130,14 @@ fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::
     needs.prepare()?;
     let locked = lock_files(&needs)?;
     let mut backend: NvidiaBackend<LinuxRm> = start_backend(&setup)?;
-    if let Some(micros) = timeslice(env::var("GUESTHOUSE_TIMESLICE_US").ok().as_deref()) {
+    if let Some(micros) =
+        timeslice("GUESTHOUSE_TIMESLICE_US", env::var("GUESTHOUSE_TIMESLICE_US").ok().as_deref())
+    {
         backend.set_graphics_timeslice(micros);
     }
+    let shared = env::var("GUESTHOUSE_SHARED_CONTEXT_TIMESLICE_US").ok();
+    let shared = timeslice("GUESTHOUSE_SHARED_CONTEXT_TIMESLICE_US", shared.as_deref());
+    backend.set_shared_context_timeslice(shared.unwrap_or(SHARED_CONTEXT_TIMESLICE_MICROS));
     let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
     let config = Config::new(limits);
     let mut session = Session::new(backend, memory, config);
@@ -146,13 +151,19 @@ fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// How long a ring channel of a context with several queues holds the GPU, unless
+/// `GUESTHOUSE_SHARED_CONTEXT_TIMESLICE_US` says otherwise (0 for the RM's own slice). The RM's is
+/// 1,024 µs, which a Direct3D 12 queue's waiting channel sits through every frame.
+#[cfg(feature = "nvidia")]
+const SHARED_CONTEXT_TIMESLICE_MICROS: u64 = 250;
+
 /// A timeslice in microseconds, if the setting is there and makes sense.
 #[cfg(feature = "nvidia")]
-fn timeslice(text: Option<&str>) -> Option<u64> {
+fn timeslice(name: &str, text: Option<&str>) -> Option<u64> {
     let text = text?;
     let micros = text.parse().ok();
     if micros.is_none() {
-        log::warn!("GUESTHOUSE_TIMESLICE_US is {text}, which isn't a number of microseconds");
+        log::warn!("{name} is {text}, which isn't a number of microseconds");
     }
     micros
 }

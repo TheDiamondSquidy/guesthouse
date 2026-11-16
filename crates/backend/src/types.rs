@@ -269,6 +269,8 @@ pub struct Work<'a> {
     pub node: u32,
     /// What the guest said its context is for.
     pub client_hint: u32,
+    /// How many queues the queue's context has right now, this one included.
+    pub context_queues: u32,
     /// The vendor driver's private data.
     pub private: &'a [u8],
     pub fence: u64,

@@ -656,6 +656,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             space: record.space,
             node: self.context_nodes.get(&record.context).copied().unwrap_or(0),
             client_hint: self.context_hints.get(&record.context).copied().unwrap_or(0),
+            context_queues: self.context_queues.get(&record.context).map_or(1, |queues| queues.len() as u32),
             private,
             fence,
             fence_gpu_address,

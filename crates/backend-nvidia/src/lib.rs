@@ -179,6 +179,15 @@ impl<R: Rm> NvidiaBackend<R> {
         self.device.graphics_timeslice_micros = micros;
     }
 
+    /// How long each ring channel of a guest context with several queues may hold the GPU, for
+    /// channels made from now on. Such queues wait on each other, as a Direct3D 12 queue's do, and
+    /// each is a channel group of its own, so a channel that waits holds the GPU for its whole slice
+    /// while what it waits for sits on another. 0 leaves the RM's own choice. A slice set with
+    /// [`Self::set_graphics_timeslice`] goes before this one.
+    pub fn set_shared_context_timeslice(&mut self, micros: u64) {
+        self.device.shared_context_timeslice_micros = micros;
+    }
+
     /// Reads the card and works out everything the guest will be told. Nothing here changes the card.
     pub fn start(
         mut device: Device<R>,
