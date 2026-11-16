@@ -137,8 +137,9 @@ new_test() {
 
 # The whole filesystem read-only, the test's folder writable, and these few things faked.
 sandbox() {
+    # Some distros, CachyOS for one, keep /etc/os-release as a file of its own, not a link.
     local options=(--ro-bind / / --dev-bind /dev /dev --bind "$T" "$T" --tmpfs /run
-        --ro-bind "$T/os-release" /usr/lib/os-release)
+        --ro-bind "$T/os-release" /usr/lib/os-release --ro-bind "$T/os-release" /etc/os-release)
     [ "$OSTREE" = no ] || options+=(--ro-bind "$T/os-release" /run/ostree-booted)
     [ "$KVM_CLOSED" = no ] || options+=(--ro-bind "$T/closed-kvm" /dev/kvm)
     mkdir -p "$T/firmware"
@@ -150,7 +151,7 @@ sandbox() {
     [ "$WITHOUT_NAMESPACE" = no ] || wrapper=()
     env -i HOME="$H" PATH="$T/bin" XDG_RUNTIME_DIR="$T/runtime" STAND_IN_LOG="$T/log" \
         FAKE_RELEASES="$T/releases" FAKE_LIBRARIES="$T/libraries" LIBRARIES_PRESENT="${LIBRARIES_PRESENT:-}" \
-        FAKE_FIRMWARE="$T/firmware" SUDO_FAILS="${SUDO_FAILS:-}" FAKE_GPU_REFUSED="${FAKE_GPU_REFUSED:-}" FAKE_AMD="${FAKE_AMD:-}" FAKE_GTK="${FAKE_GTK-4.20}" \
+        DBUS_SESSION_BUS_ADDRESS="${FAKE_SESSION_BUS:-}" FAKE_FIRMWARE="$T/firmware" SUDO_FAILS="${SUDO_FAILS:-}" FAKE_GPU_REFUSED="${FAKE_GPU_REFUSED:-}" FAKE_AMD="${FAKE_AMD:-}" FAKE_GTK="${FAKE_GTK-4.20}" \
         "${wrapper[@]}" "$@"
 }
 
