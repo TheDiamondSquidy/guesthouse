@@ -88,7 +88,7 @@ fn a_new_machine_is_refused_in_the_dialogs_words() {
 #[test]
 fn a_windows_disc_says_what_it_is_and_what_stops_it() {
     let scratch = Scratch::new();
-    let mut context = scratch_context(&scratch);
+    let mut context = with_cards(&scratch, &[("0000:01:00.0", 0x2B85)]);
     // The room an install needs depends on the disk this test runs on.
     context.install_room = Some(0);
     let data = wim(&["Windows 11 Pro"], 26300, 9);

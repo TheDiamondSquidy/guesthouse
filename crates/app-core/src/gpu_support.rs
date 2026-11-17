@@ -2,6 +2,7 @@
 //! are what it has. A daemon alone says nothing, as every build of this repo makes one, and neither
 //! do the guest's files, which the repo has too. So a build of the repo also needs a QEMU with the patch.
 
+use crate::card_choice::windows_card_choices;
 use crate::context::Context;
 use crate::linux::layout::SEED_FOLDER;
 use crate::linux::{guest_sources, sensor_daemon};
@@ -12,6 +13,8 @@ use std::sync::OnceLock;
 
 /// Said wherever a GPU machine would have been offered.
 pub const NO_GPU_PART: &str = "This build has no GPU part, so it runs plain VMs and not GPU machines.";
+/// Said of a Windows disc on a PC whose cards GPU-PV doesn't handle.
+pub const NO_WINDOWS_CARD: &str = "No graphics card in this PC can run Windows with GPU-PV.";
 
 /// Said when an Ubuntu disc can't install by itself here.
 pub const NO_UBUNTU_INSTALL_YET: &str = "The files that install Ubuntu by itself aren't here, so this is like any other disc. A build of the repo has them.";
@@ -76,27 +79,36 @@ pub fn ubuntu_note(context: &Context) -> &'static str {
 pub fn plain_reason(context: &Context, disc: Kind) -> &'static str {
     match disc {
         Kind::Windows if !gpu_ready(context) => NO_GPU_PART,
+        Kind::Windows if windows_card_choices(context).is_empty() => NO_WINDOWS_CARD,
         Kind::Linux if !ubuntu_install_ready(context) => NO_UBUNTU_INSTALL_YET,
         _ => "",
     }
 }
 
-/// What a disc can become here. Without the files that install it by itself, it's a plain VM that the
-/// user installs by hand.
+/// What a disc can become here. Without the files that install it by itself, or for Windows a card
+/// that can run it, it's a plain VM that the user installs by hand.
 pub fn kind_offered(context: &Context, kind: Kind) -> Kind {
-    match kind {
-        Kind::Windows if !gpu_ready(context) => Kind::Plain,
-        Kind::Linux if !ubuntu_install_ready(context) => Kind::Plain,
-        kind => kind,
-    }
+    if plain_reason(context, kind).is_empty() { kind } else { Kind::Plain }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linux::amd::stand_in::{fake_graphics, fake_render_node};
+    use crate::setup::cards::stand_in::fake_pci;
     use crate::testing::{Scratch, scratch_context};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    const RTX_5090: u32 = 0x2B85;
+
+    /// A PC with one NVIDIA card that runs Windows, whatever cards the PC running the test has.
+    fn context_with_a_card(scratch: &Scratch) -> Context {
+        let mut context = scratch_context(scratch);
+        context.pci_devices = scratch.path("pci");
+        fake_pci(scratch, "0000:01:00.0", RTX_5090, "0x10de", "0x030000");
+        context
+    }
 
     #[test]
     fn only_the_patched_qemu_lists_our_device() {
@@ -138,12 +150,28 @@ mod tests {
     #[test]
     fn each_kind_of_disc_says_what_it_lacks() {
         let scratch = Scratch::new();
-        let context = scratch_context(&scratch);
+        let context = context_with_a_card(&scratch);
         assert_eq!(plain_reason(&context, Kind::Windows), "");
         assert_eq!(plain_reason(&context, Kind::Linux), NO_UBUNTU_INSTALL_YET);
         assert_eq!(plain_reason(&context, Kind::Plain), "");
         fs::remove_dir_all(context.paths.guest_files()).unwrap();
         assert_eq!(plain_reason(&context, Kind::Windows), NO_GPU_PART);
+    }
+
+    #[test]
+    fn a_windows_disc_is_a_plain_vm_on_a_pc_whose_card_is_too_old() {
+        let scratch = Scratch::new();
+        let mut context = scratch_context(&scratch);
+        context.pci_devices = scratch.path("pci");
+        let polaris = "0000:03:00.0";
+        fake_render_node(&scratch, 128, polaris, "0x1002", 0x67df);
+        assert!(gpu_ready(&context));
+        assert_eq!(kind_offered(&context, Kind::Windows), Kind::Plain);
+        assert_eq!(plain_reason(&context, Kind::Windows), NO_WINDOWS_CARD);
+        let rdna2 = 10;
+        fake_graphics(&scratch, polaris, rdna2);
+        assert_eq!(kind_offered(&context, Kind::Windows), Kind::Windows);
+        assert_eq!(plain_reason(&context, Kind::Windows), "");
     }
 
     #[test]
@@ -172,7 +200,7 @@ mod tests {
     #[test]
     fn the_program_folder_brings_what_it_holds() {
         let scratch = Scratch::new();
-        let context = scratch_context(&scratch);
+        let context = context_with_a_card(&scratch);
         assert!(gpu_ready(&context));
         assert_eq!(kind_offered(&context, Kind::Windows), Kind::Windows);
         assert_eq!(kind_offered(&context, Kind::Linux), Kind::Plain, "Ubuntu's setup files aren't here");

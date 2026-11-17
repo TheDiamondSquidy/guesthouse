@@ -1,11 +1,12 @@
 //! The cards a Windows machine's GPU-PV can run on, as the user is offered them. A machine names its
 //! card in `amd_gpu`: an AMD card by PCI address, or empty for the NVIDIA card setup chose. Any card
 //! can be picked when the machine is made. After that it can move only to a card of the same maker.
+//! A card GPU-PV doesn't handle isn't offered, and a PC with only such cards makes plain VMs.
 
 use crate::context::Context;
 use crate::linux::amd::{amd_cards, default_linux_gpu};
 use crate::machine::Machine;
-use crate::setup::cards::{card_in_use, find_cards};
+use crate::setup::cards::{Support, amd_support, card_in_use, find_cards};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardChoice {
@@ -19,12 +20,14 @@ pub struct CardChoice {
 /// Every card here a new Windows machine could run on, NVIDIA's first.
 pub fn windows_card_choices(context: &Context) -> Vec<CardChoice> {
     let mut choices = Vec::new();
-    if !find_cards(context).is_empty() {
+    // The best NVIDIA card comes first, so if that one isn't handled none is.
+    if find_cards(context).first().is_some_and(|card| card.support != Support::Unsupported) {
         let card = card_in_use(context);
         let label = card.as_ref().map_or_else(|| "NVIDIA".to_owned(), |card| card.name.clone());
         choices.push(CardChoice { pci: String::new(), label, device: card.map_or(0, |card| card.device) });
     }
-    let amd = amd_cards(context).into_iter();
+    let amd =
+        amd_cards(context).into_iter().filter(|card| amd_support(context, card) != Support::Unsupported);
     choices.extend(amd.map(|card| CardChoice {
         label: format!("{} at {}", card.name, card.pci),
         pci: card.pci,
@@ -56,11 +59,13 @@ pub fn default_choice(context: &Context, choices: &[CardChoice]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linux::amd::stand_in::fake_render_node;
+    use crate::linux::amd::stand_in::{fake_graphics, fake_render_node};
     use crate::setup::cards::stand_in::{NAMES, fake_pci};
     use crate::testing::{Scratch, scratch_context};
 
     const IGPU: &str = "0000:7c:00.0";
+    const RDNA3_GRAPHICS: u32 = 11;
+    const POLARIS_GRAPHICS: u32 = 8;
 
     fn with_cards(scratch: &Scratch, nvidia: bool) -> Context {
         let mut context = scratch_context(scratch);
@@ -70,6 +75,7 @@ mod tests {
             fake_pci(scratch, "0000:01:00.0", 0x2B85, "0x10de", "0x030000");
         }
         fake_render_node(scratch, 128, IGPU, "0x1002", 0x13c0);
+        fake_graphics(scratch, IGPU, RDNA3_GRAPHICS);
         context
     }
 
@@ -107,5 +113,17 @@ mod tests {
         let addresses: Vec<&str> = offered.iter().map(|choice| choice.pci.as_str()).collect();
         assert_eq!(addresses, [IGPU, "0000:0a:00.0"]);
         assert!(offered[1].label.contains("isn't in this PC now"));
+    }
+
+    #[test]
+    fn a_card_gpu_pv_does_not_handle_is_not_offered() {
+        let scratch = Scratch::new();
+        let context = with_cards(&scratch, false);
+        fake_render_node(&scratch, 129, "0000:03:00.0", "0x1002", 0x67df);
+        fake_graphics(&scratch, "0000:03:00.0", POLARIS_GRAPHICS);
+        // An NVIDIA card from before the ones the daemon knows.
+        fake_pci(&scratch, "0000:01:00.0", 0x1B80, "0x10de", "0x030000");
+        let choices = windows_card_choices(&context);
+        assert_eq!(choices.iter().map(|choice| choice.pci.as_str()).collect::<Vec<_>>(), [IGPU]);
     }
 }
