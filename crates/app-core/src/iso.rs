@@ -45,6 +45,9 @@ pub struct Iso {
     /// What it is, in a few words.
     pub title: String,
     pub edition: String,
+    /// Whether it's a Windows disc, of any edition. A plain VM made from one still gets a TPM and
+    /// Secure Boot, as Windows 11's setup refuses a PC without them.
+    pub windows_disc: bool,
 }
 
 const UBUNTU_KERNEL: &str = "casper/vmlinuz";
@@ -72,13 +75,19 @@ fn read_ubuntu(names: &HashMap<String, &str>) -> Option<Iso> {
             kind: Kind::Linux,
             title: format!("Ubuntu server, {package}"),
             edition: package.to_owned(),
+            windows_disc: false,
         },
     ))
 }
 
 impl Iso {
     fn plain(title: &str) -> Self {
-        Self { kind: Kind::Plain, title: title.to_owned(), edition: String::new() }
+        Self { kind: Kind::Plain, title: title.to_owned(), edition: String::new(), windows_disc: false }
+    }
+
+    /// A Windows disc that doesn't install by itself.
+    fn plain_windows(title: &str) -> Self {
+        Self { windows_disc: true, ..Self::plain(title) }
     }
 }
 
@@ -213,14 +222,15 @@ fn read_disc(path: &str, look: Look) -> Result<Iso> {
         return Ok(read_ubuntu(&names).unwrap_or_else(|| Iso::plain("Not Windows")));
     };
     if look == Look::Names {
-        return Ok(Iso::plain("Windows"));
+        return Ok(Iso::plain_windows("Windows"));
     }
     for (name, build, architecture) in wim_images(path, entry) {
         if name == WINDOWS_EDITION && build >= FIRST_WINDOWS_11_BUILD && architecture == WIM_AMD64 {
-            return Ok(Iso { kind: Kind::Windows, title: format!("{name}, build {build}"), edition: name });
+            let title = format!("{name}, build {build}");
+            return Ok(Iso { kind: Kind::Windows, title, edition: name, windows_disc: true });
         }
     }
-    Ok(Iso::plain("Windows, but not 64-bit Windows 11 with the Pro edition"))
+    Ok(Iso::plain_windows("Windows, but not 64-bit Windows 11 with the Pro edition"))
 }
 
 #[cfg(test)]
@@ -315,6 +325,7 @@ mod tests {
         let windows = make_iso(&scratch, "windows", &[("sources/install.wim", b"never read")]);
         let found = read_iso_for_plain_windows(&windows).unwrap();
         assert_eq!((found.kind, found.title.as_str()), (Kind::Plain, "Windows"));
+        assert!(found.windows_disc);
         let package = "pool/main/l/linux-signed/linux-image-7.0.0-38-generic_7.0.0-38.38_amd64.deb";
         let files: [(&str, &[u8]); 3] =
             [("casper/vmlinuz", b"kernel"), ("casper/initrd", b"initrd"), (package, b"deb")];
