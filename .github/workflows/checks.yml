@@ -53,7 +53,11 @@ jobs:
     name: tests
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    container: registry.fedoraproject.org/fedora:44
+    container:
+      image: registry.fedoraproject.org/fedora:44
+      # Docker's default filter blocks personality(), which the jail's tests use through setarch, and
+      # what bubblewrap needs for its namespaces. The runner is a throwaway machine.
+      options: --security-opt seccomp=unconfined
     steps:
       # The build's packages, and the tools the app's tests run for real on disk images and ISOs.
       - name: Install what the build and the tests need
