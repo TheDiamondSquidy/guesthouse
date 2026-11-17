@@ -234,6 +234,7 @@ fn install_setup(scratch: &Scratch) -> (Context, Machine) {
         name: "Steps".into(),
         iso,
         kind: Kind::Windows,
+        windows_disc: true,
         cores: 2,
         ram_gib: 4,
         disk_gib: 64,

@@ -5,11 +5,11 @@ use super::args::NewOptions;
 use super::{follow_up, run_task};
 use crate::card_choice::{default_choice, windows_card_choices};
 use crate::context::Context;
-use crate::defaults::{NO_GPU, account_name, sizes_for};
+use crate::defaults::{NO_GPU, account_name, sizes_for_disc};
 use crate::failure::{Failure, Result};
-use crate::gpu_support::{kind_offered, plain_reason, ubuntu_note};
+use crate::gpu_support::{kind_offered, plain_reason, read_disc, ubuntu_note};
 use crate::host::{RamField, physical_cores};
-use crate::iso::read_iso;
+use crate::iso::Iso;
 use crate::library::{NewMachine, create, delete, remove_entry};
 use crate::machine::{Kind, MIN_RAM_GIB, Machine, load};
 use crate::setup::checks::machine_gpu_warning;
@@ -39,8 +39,8 @@ fn whole_number(option: &str, text: &str) -> Result<u32> {
 }
 
 /// What the disc becomes here, and what the dialog says of it.
-fn kind_of_disc(context: &Context, path: &str, wanted: Option<&str>, out: &mut dyn Write) -> Result<Kind> {
-    let found = read_iso(path)?;
+fn disc_offered(context: &Context, path: &str, wanted: Option<&str>, out: &mut dyn Write) -> Result<Iso> {
+    let found = read_disc(context, path)?;
     let kind = kind_offered(context, found.kind);
     let reason = plain_reason(context, found.kind);
     let verdict = match kind {
@@ -61,7 +61,7 @@ fn kind_of_disc(context: &Context, path: &str, wanted: Option<&str>, out: &mut d
             )));
         }
     }
-    Ok(kind)
+    Ok(Iso { kind, ..found })
 }
 
 /// The card a Windows machine runs on, as the dialog would choose it unless one was named. Empty is
@@ -88,7 +88,8 @@ pub(super) fn new_machine(
     out: &mut dyn Write,
 ) -> Result<()> {
     let iso = options.iso.ok_or_else(|| Failure::new("new needs --iso PATH, the disc to install from."))?;
-    let kind = kind_of_disc(context, iso, options.kind, out)?;
+    let disc = disc_offered(context, iso, options.kind, out)?;
+    let kind = disc.kind;
     let windows = kind == Kind::Windows;
     if kind == Kind::Plain && options.user.is_some() {
         return Err(Failure::new("A plain VM has no account to name. It is installed by hand."));
@@ -96,7 +97,7 @@ pub(super) fn new_machine(
     if !windows && options.amd_card.is_some() {
         return Err(Failure::new("Only a Windows machine chooses its card here."));
     }
-    let sizes = sizes_for(kind);
+    let sizes = sizes_for_disc(&disc);
     let field = if windows {
         RamField::for_gpu(context, context.slot, MIN_RAM_GIB.into(), sizes.ram)
     } else {
@@ -110,6 +111,7 @@ pub(super) fn new_machine(
         name: name.to_owned(),
         iso: iso.to_owned(),
         kind,
+        windows_disc: disc.windows_disc,
         cores: number("--cores", options.cores, sizes.cores.min(physical_cores(&context.cpus)))?,
         ram_gib: number("--ram", options.ram, field.value as u32)?,
         disk_gib: number("--disk", options.disk, sizes.disk)?,

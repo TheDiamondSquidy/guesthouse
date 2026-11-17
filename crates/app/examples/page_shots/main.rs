@@ -270,6 +270,7 @@ fn library_machines(context: &Arc<Context>, window: &Window, folder: &Path) -> V
         name: "Tiny Linux".into(),
         iso,
         kind: Kind::Plain,
+        windows_disc: false,
         cores: 2,
         ram_gib: 2,
         disk_gib: 4,

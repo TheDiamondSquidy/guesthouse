@@ -215,6 +215,7 @@ mod tests {
             name: "Snaps".into(),
             iso,
             kind: Kind::Plain,
+            windows_disc: false,
             cores: 1,
             ram_gib: 1,
             disk_gib: 1,

@@ -79,6 +79,9 @@ pub struct NewMachine {
     pub name: String,
     pub iso: String,
     pub kind: Kind,
+    /// Whether the disc is Windows, which a plain VM can be made from too. It gets a TPM and Secure
+    /// Boot then, as Windows 11's setup asks for both.
+    pub windows_disc: bool,
     pub cores: u32,
     pub ram_gib: u32,
     pub disk_gib: u32,
@@ -169,7 +172,7 @@ pub fn create(context: &Context, new: &NewMachine) -> Result<Machine> {
         kind: new.kind,
         iso: new.iso.clone(),
         installing: installs,
-        tpm: windows,
+        tpm: windows || new.windows_disc,
         mac: unused_mac(context),
         amd_gpu: new.amd_gpu.clone().unwrap_or_else(|| crate::linux::amd::default_linux_gpu(context)),
         user: if installs { new.user.trim().to_owned() } else { String::new() },
@@ -298,6 +301,7 @@ mod tests {
             name: name.into(),
             iso,
             kind: Kind::Plain,
+            windows_disc: false,
             cores: 1,
             ram_gib: 1,
             disk_gib: 2,
@@ -331,6 +335,7 @@ mod tests {
             name: "Ubuntu".into(),
             iso,
             kind: Kind::Linux,
+            windows_disc: false,
             cores: 2,
             ram_gib: 2,
             disk_gib: 20,
@@ -380,6 +385,16 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_machine_from_a_windows_disc_gets_a_tpm_and_secure_boot() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let new = NewMachine { windows_disc: true, ..plain(&scratch, "By Hand", None) };
+        let made = create(&context, &new).unwrap();
+        assert!(made.kind == Kind::Plain && made.tpm && !made.installing && !made.has_gpu());
+        assert_eq!(fs::read_to_string(&made.vars).unwrap(), "firmware settings with keys");
+    }
+
+    #[test]
     fn a_plain_machine_gets_a_folder_disk_and_firmware() {
         let scratch = Scratch::new();
         let context = scratch_context(&scratch);
@@ -405,6 +420,7 @@ mod tests {
             name: "Win".into(),
             iso,
             kind: Kind::Windows,
+            windows_disc: true,
             cores: 8,
             ram_gib: 16,
             disk_gib: 80,
@@ -425,6 +441,7 @@ mod tests {
             name: "VM".into(),
             iso,
             kind: Kind::Plain,
+            windows_disc: false,
             cores: 2,
             ram_gib: 2,
             disk_gib: 4,
@@ -446,6 +463,7 @@ mod tests {
             name: "Win".into(),
             iso,
             kind: Kind::Windows,
+            windows_disc: true,
             cores: 2,
             ram_gib: 4,
             disk_gib: 64,
@@ -478,6 +496,7 @@ mod tests {
             name: "Ubuntu".into(),
             iso,
             kind: Kind::Linux,
+            windows_disc: false,
             cores: 8,
             ram_gib: 8,
             disk_gib: 2,
@@ -500,6 +519,7 @@ mod tests {
             name: "Win".into(),
             iso,
             kind: Kind::Windows,
+            windows_disc: true,
             cores: 2,
             ram_gib: 4,
             disk_gib: 64,

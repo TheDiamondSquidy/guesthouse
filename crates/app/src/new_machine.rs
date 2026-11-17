@@ -7,11 +7,11 @@ use crate::window::Window;
 use adw::prelude::*;
 use guesthouse_app_core::account::{default_user, name_problem, password_problem};
 use guesthouse_app_core::card_choice::{CardChoice, default_choice, windows_card_choices};
-use guesthouse_app_core::defaults::{NO_GPU, account_name, sizes_for, suggested_name};
+use guesthouse_app_core::defaults::{NO_GPU, account_name, sizes_for_disc, suggested_name};
 use guesthouse_app_core::display::DriverPackage;
-use guesthouse_app_core::gpu_support::{kind_offered, plain_reason, ubuntu_note};
+use guesthouse_app_core::gpu_support::{kind_offered, plain_reason, read_disc, ubuntu_note};
 use guesthouse_app_core::host::{RamField, physical_cores};
-use guesthouse_app_core::iso::{Iso, read_iso};
+use guesthouse_app_core::iso::Iso;
 use guesthouse_app_core::library::{
     MAX_DISK_GIB, MIN_PLAIN_DISK_GIB, MIN_WINDOWS_DISK_GIB, NewMachine, create,
 };
@@ -254,9 +254,10 @@ impl NewMachineDialog {
         let context = self.0.window.context();
         let this = self.clone();
         let reading = path.clone();
+        let reader = context.clone();
         in_background(
             &context,
-            move || read_iso(&reading),
+            move || read_disc(&reader, &reading),
             move |result| {
                 // Another choice may have come since. Only the newest counts.
                 if this.0.iso_path.borrow().as_deref() != Some(&path) {
@@ -310,10 +311,10 @@ impl NewMachineDialog {
         }
     }
 
-    fn set_sizes(&self, kind: Kind) {
+    fn set_sizes(&self, iso: &Iso) {
         let context = self.0.window.context();
-        let windows = kind == Kind::Windows;
-        let sizes = sizes_for(kind);
+        let windows = iso.kind == Kind::Windows;
+        let sizes = sizes_for_disc(iso);
         let field = if windows {
             RamField::for_gpu(&context, context.slot, MIN_RAM_GIB.into(), sizes.ram)
         } else {
@@ -339,7 +340,7 @@ impl NewMachineDialog {
         let reason = plain_reason(&context, iso.kind);
         let iso = Iso { kind: kind_offered(&context, iso.kind), ..iso };
         self.describe(&iso, reason);
-        self.set_sizes(iso.kind);
+        self.set_sizes(&iso);
         self.0.card.set_visible(iso.kind == Kind::Windows && self.0.cards.len() > 1);
         let suggestion = suggested_name(iso.kind, path);
         if keeps_following_the_disc(&self.0.name.text(), &self.0.suggested.borrow()) {
@@ -431,6 +432,7 @@ impl NewMachineDialog {
             name: parts.name.text().to_string(),
             iso: path,
             kind: iso.kind,
+            windows_disc: iso.windows_disc,
             cores: parts.cores.value() as u32,
             ram_gib: parts.ram.value() as u32,
             disk_gib: parts.disk.value() as u32,
