@@ -55,7 +55,6 @@ $mode = New-Object Screens+DM
 $mode.Size = $size
 [void][Screens]::EnumDisplaySettings($ours.Name, -1, [ref]$mode)
 $mode.W = $Width; $mode.H = $Height; $mode.Freq = $Hz; $mode.x = 0; $mode.y = 0
-$sizeRateAndPosition = 0x580020
 $updateRegistryPrimaryNoReset = 0x10000011
 Say "making $($ours.Name) primary: $([Screens]::ChangeDisplaySettingsEx($ours.Name, [ref]$mode, [IntPtr]::Zero, $updateRegistryPrimaryNoReset, [IntPtr]::Zero))"
 

@@ -4,7 +4,7 @@
 # Needs a build first: cargo build -p guesthouse-app --example page_shots --bins
 set -e
 FOLDER=$(realpath -m "${1:?usage: page-shots.sh FOLDER}")
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROGRAM=${CARGO_TARGET_DIR:-$HERE/../../target}/debug/examples/page_shots
 BROADWAY_DISPLAY=:49
 BROADWAY_PORT=28949
