@@ -84,6 +84,9 @@ pub struct Device<R> {
     pub rm: R,
     /// How long a graphics channel group may hold the GPU. 0 leaves the RM's own choice.
     pub graphics_timeslice_micros: u64,
+    /// The same for the ring channels of a guest context that has several queues, unless
+    /// `graphics_timeslice_micros` is set. 0 leaves the RM's own choice.
+    pub shared_context_timeslice_micros: u64,
     pub client: Handle,
     pub device: Handle,
     pub subdevice: Handle,
@@ -135,6 +138,7 @@ impl<R: Rm> Device<R> {
         RmError::check(|| format!("class {SUBDEVICE:#x}"), status)?;
         Ok(Self {
             graphics_timeslice_micros: 0,
+            shared_context_timeslice_micros: 0,
             rm,
             client,
             device: DEVICE_HANDLE,

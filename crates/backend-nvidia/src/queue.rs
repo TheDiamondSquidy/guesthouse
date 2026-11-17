@@ -122,6 +122,17 @@ fn mirrors_pool(work: &Work<'_>) -> bool {
     POOL_SHARING_HINTS.contains(&work.client_hint)
 }
 
+/// The slice for a new ring channel whose context has other queues, if it gets one of its own.
+///
+/// Queues of one context wait on each other: a Direct3D 12 queue is three of them, and each
+/// submission comes to all three. Every channel is a channel group of its own, and one that waits
+/// for another keeps the GPU until its slice ends. A context with one queue has nobody to wait
+/// for, so it keeps the RM's slice, which serves it better. A slice set for every graphics channel
+/// is already on the group, and stays.
+fn shared_context_timeslice(engine: Engine, context_queues: u32, everyone: u64, shared: u64) -> Option<u64> {
+    (engine == Engine::Graphics && context_queues > 1 && everyone == 0 && shared != 0).then_some(shared)
+}
+
 fn word(data: &[u8], at: usize) -> u32 {
     data.get(at..at + 4).map_or(0, |bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
 }
@@ -377,8 +388,19 @@ impl<R: Rm> NvidiaBackend<R> {
         let local_memory = self.local_memory_place(host, engine);
         let Some(space) = self.spaces.get(&work.space) else { return };
         let made = Channel::new(&mut self.device, self.generation, self.host_branch, space, place, engine);
+        let (everyone, shared) =
+            (self.device.graphics_timeslice_micros, self.device.shared_context_timeslice_micros);
         match made {
             Ok(mut channel) => {
+                if let Some(micros) = shared_context_timeslice(engine, work.context_queues, everyone, shared)
+                {
+                    log::info!(
+                        "queue {:#x} shares its context with {} more, so its channel gets a {micros} µs slice",
+                        work.queue,
+                        work.context_queues - 1
+                    );
+                    channel.set_timeslice(&mut self.device, micros);
+                }
                 if let Some((address, window)) = local_memory
                     && let Err(error) = channel.add_local_memory(&mut self.device, space, address, window)
                 {
@@ -921,6 +943,7 @@ mod tests {
             space: SpaceId(1),
             node: 1,
             client_hint: 0,
+            context_queues: 1,
             private,
             fence: 0,
             fence_gpu_address: 0,
@@ -928,6 +951,16 @@ mod tests {
             may_run: true,
             queue_failed: false,
         }
+    }
+
+    #[test]
+    fn only_a_graphics_channel_whose_context_has_other_queues_gets_the_shared_slice() {
+        assert_eq!(shared_context_timeslice(Engine::Graphics, 3, 0, 250), Some(250));
+        assert_eq!(shared_context_timeslice(Engine::Graphics, 2, 0, 250), Some(250));
+        assert_eq!(shared_context_timeslice(Engine::Graphics, 1, 0, 250), None, "a lone queue");
+        assert_eq!(shared_context_timeslice(Engine::Copy, 3, 0, 250), None);
+        assert_eq!(shared_context_timeslice(Engine::Graphics, 3, 0, 0), None, "switched off");
+        assert_eq!(shared_context_timeslice(Engine::Graphics, 3, 4000, 250), None, "everyone's slice wins");
     }
 
     #[test]
