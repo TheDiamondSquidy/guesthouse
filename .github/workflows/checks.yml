@@ -55,8 +55,12 @@ jobs:
     timeout-minutes: 45
     container: registry.fedoraproject.org/fedora:44
     steps:
-      - name: Install what the build needs
-        run: dnf -y install gcc git xz findutils which binutils pkgconf-pkg-config rust cargo gtk4-devel libadwaita-devel tar zstd
+      # The build's packages, and the tools the app's tests run for real on disk images and ISOs.
+      - name: Install what the build and the tests need
+        run: |
+          dnf -y install gcc git xz findutils which binutils pkgconf-pkg-config rust cargo gtk4-devel \
+            libadwaita-devel tar zstd qemu-img p7zip p7zip-plugins genisoimage swtpm openssl \
+            openssh-clients bubblewrap util-linux
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
