@@ -254,6 +254,14 @@ fn inner() {
     let plain = make_machine(&context, "plain", Kind::Plain);
     start_and_stop(&context, &plain);
     let windows = make_machine(&context, "windows", Kind::Windows);
+    // The flow makes the one NVIDIA card a GPU machine needs, so it doesn't depend on this PC having one.
+    let pci = context.paths.machines.parent().unwrap().join("pci");
+    let card = pci.join("0000:01:00.0");
+    fs::create_dir_all(&card).unwrap();
+    fs::write(card.join("vendor"), "0x10de\n").unwrap();
+    fs::write(card.join("class"), "0x030000\n").unwrap();
+    fs::write(card.join("device"), "0x2704\n").unwrap();
+    context.pci_devices = pci;
     make_token(&context, &windows).unwrap();
     fs::create_dir_all(driver_folder(&context)).unwrap();
     write_setup(&context, json!({"card": {"device": 1}}).as_object().cloned().unwrap()).unwrap();
