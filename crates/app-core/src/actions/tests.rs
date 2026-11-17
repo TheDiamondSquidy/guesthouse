@@ -115,7 +115,9 @@ fn a_gpu_machine_with_no_setup_is_refused_before_anything_starts() {
 #[test]
 fn a_gpu_machine_with_no_token_is_refused_before_anything_starts() {
     let scratch = Scratch::new();
-    let context = plain_task_context(&scratch);
+    let mut context = plain_task_context(&scratch);
+    context.pci_names = scratch.write("pci.ids", crate::setup::cards::stand_in::NAMES);
+    crate::setup::cards::stand_in::fake_pci(&scratch, "0000:01:00.0", 0x2704, "0x10de", "0x030000");
     fs::create_dir_all(crate::settings::driver_folder(&context)).unwrap();
     let card = serde_json::json!({"card": {"device": 1}});
     crate::settings::write_setup(&context, card.as_object().cloned().unwrap()).unwrap();

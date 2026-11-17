@@ -251,6 +251,7 @@ fn make_machine(context: &Context, id: &str, kind: Kind) -> Machine {
 fn inner() {
     let mut context = Context::from_process().unwrap();
     context.paths.binaries = env::var_os("FLOW_BINARIES").unwrap().into();
+    context.pci_devices = env::var_os(PCI_VARIABLE).unwrap().into();
     let plain = make_machine(&context, "plain", Kind::Plain);
     start_and_stop(&context, &plain);
     let windows = make_machine(&context, "windows", Kind::Windows);
@@ -283,6 +284,7 @@ fn copy_program(from: &Path, to: PathBuf) {
 
 /// Where this test's own tasks read the host's memory figures. Only this program knows it.
 const MEMINFO_VARIABLE: &str = "FLOW_MEMINFO";
+const PCI_VARIABLE: &str = "FLOW_PCI";
 /// Enough for the test's machine however busy the PC is.
 const PLENTY_OF_MEMORY: &str = "MemTotal: 67108864 kB\nMemAvailable: 67108864 kB\n";
 const PLENTY_OF_GIB: u64 = 64;
@@ -297,6 +299,12 @@ fn outer() {
     }
     fs::write(program.join("guest/display.ps1"), "what the session sees").unwrap();
     fs::write(folder.join("meminfo"), PLENTY_OF_MEMORY).unwrap();
+    // The one NVIDIA card a GPU machine needs, made here so the flow doesn't depend on this PC having one.
+    let card = folder.join("pci/0000:01:00.0");
+    fs::create_dir_all(&card).unwrap();
+    for (name, value) in [("vendor", "0x10de"), ("class", "0x030000"), ("device", "0x2704")] {
+        fs::write(card.join(name), format!("{value}\n")).unwrap();
+    }
     copy_program(&this, bin.join("guesthouse-task"));
     copy_program(&this, bin.join("qemu"));
     let daemon = env::var_os(REAL_DAEMON_VARIABLE).map_or_else(|| this.clone(), PathBuf::from);
@@ -315,6 +323,7 @@ fn outer() {
         .env("XDG_RUNTIME_DIR", folder.join("run"))
         .env("GUESTHOUSE_SHARED_MEMORY", folder.join("shm"))
         .env(MEMINFO_VARIABLE, folder.join("meminfo"))
+        .env(PCI_VARIABLE, folder.join("pci"))
         .env("GUESTHOUSE_PROGRAM", &program)
         .env("AGENT_PORT", free_port().to_string())
         .env("QEMU", bin.join("qemu"))
@@ -330,6 +339,7 @@ fn task_with_room(arguments: &[String]) {
     let [action, machine, rest @ ..] = arguments else { panic!("a task needs an action and a machine") };
     let mut context = Context::from_process().unwrap();
     context.meminfo = env::var_os(MEMINFO_VARIABLE).unwrap().into();
+    context.pci_devices = env::var_os(PCI_VARIABLE).unwrap().into();
     context.ram_limit = Some(PLENTY_OF_GIB);
     context.reserve_memory = guesthouse_app_core::guest_memory::GuestMemory::sized;
     // The flow reads each task's file, as the app does, so the exit code is left to the real task.

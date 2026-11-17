@@ -521,6 +521,8 @@ mod tests {
         let scratch = Scratch::new();
         let mut context = scratch_context(&scratch);
         context.driver_version_file = scratch.write("version", "999.11\n");
+        context.pci_names = scratch.write("pci.ids", NAMES);
+        fake_pci(&scratch, "0000:01:00.0", 0x2704, "0x10de", "0x030000");
         let report = check_host(&context);
         assert!(!report.gpu);
         assert!(report.checks.iter().any(|check| check.title == "Host driver branch"));

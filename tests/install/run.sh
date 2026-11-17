@@ -214,6 +214,7 @@ done
 whole_run=
 if [ $# -eq 0 ]; then
     whole_run=yes
+    # shellcheck disable=SC2046 # one word for each test function, split on purpose
     set -- $(declare -F | awk '$3 ~ /^t_/ { print $3 }')
 fi
 for name in "$@"; do

@@ -94,6 +94,7 @@ find_store() {
     store=${GUESTHOUSE_STORE:-}
     if [ -z "$store" ] && [ -f "$CONFIG/store" ]; then
         store=$(sed -n '1s/^[[:space:]]*//; 1s/[[:space:]]*$//; 1p' "$CONFIG/store")
+        # shellcheck disable=SC2088 # a literal ~/ in the file, which is expanded by hand on the next line
         case $store in
             "~/"*) store=$HOME/${store#"~/"} ;;
         esac
