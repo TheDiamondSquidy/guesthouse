@@ -22,7 +22,7 @@ The device is told the card setup chose: `card=` is its PCI address and `card-mi
 
 ## Trying it
 
-You need an NVIDIA card with the open kernel modules loaded, and the driver version in `TESTED_VERSIONS` in `crates/app-core/src/linux/driver_versions.rs`. The host's side doesn't ask a package manager: it finds the driver through the loader. I've only run it on Fedora. Debian, Ubuntu and Arch layouts are tested with fixtures and not on real machines. You also need `bwrap`, `genisoimage`, `qemu-img` and `swtpm`. It has only been tried on an AMD CPU.
+You need an NVIDIA card with the open kernel modules loaded, and the driver version in `TESTED_VERSIONS` in `crates/app-core/src/linux/driver_versions.rs`. The host's side doesn't ask a package manager: it finds the driver through the loader. I've run it on Fedora with 615.78.08 and on CachyOS, which has Arch's layout, with 620.70.06. Debian and Ubuntu layouts are tested with fixtures and not on real machines. You also need `bwrap`, `genisoimage`, `qemu-img` and `swtpm`. It has only been tried on an AMD CPU.
 
 1. Build QEMU as `qemu/README.md` says, and copy `hw/misc/nvfwd/nvfwd-sensord` next to `qemu-system-x86_64`.
 2. `cargo build --release`, and `cargo build --release -p guesthouse-app` for the viewer.
@@ -94,7 +94,7 @@ Sunshine builds from its own source in a guest. Its startup check finds H.264, H
 Another point release of the same branch gets a warning and a try. In order, you'd see:
 
 1. The app wants NVIDIA's source at your exact version, and says how to get it.
-2. The tables made from that source have to match the ones in the device. If a driver moved a field the device checks, the GPU stays off, as QEMU would need a new build. They're the same at 615.71.09, 615.71.10 and 615.78.08.
+2. The tables made from that source have to match the ones in the device. If a driver moved a field the device checks, the GPU stays off, as QEMU would need a new build. They're the same at 615.71.09, 615.71.10 and 615.78.08. Branch 620 has tables of its own, made from 620.70.06, and the device picks by the loaded driver's version.
 3. The guest builds its modules against your driver. A change there fails the build, which turns the GPU off and names the log.
 4. The guest runs CUDA and Vulkan before it calls the GPU on. A call the allow list doesn't have shows up here: the GPU goes off, the plain desktop comes up, and the VM's `calls.log` has a `REFUSED` line for it.
 5. The sensor daemon only knows one exact version, so on any other `nvidia-smi` shows N/A. Everything else works.

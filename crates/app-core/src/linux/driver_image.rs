@@ -205,7 +205,7 @@ fn build(
     let tables = staging.join("tables");
     fs::create_dir_all(&tables)?;
     write_tables(tree, &tables)?;
-    if !match_the_device(&tables)? {
+    if !match_the_device(&tables, loaded)? {
         let detail = format!(
             "Driver {loaded} changes calls that the nvfwd device checks, so this QEMU can't forward them \
              safely. It needs a Guesthouse that knows this driver."
@@ -325,10 +325,10 @@ mod tests {
     #[test]
     fn an_unknown_branch_turns_the_gpu_off_even_with_an_image() {
         let scratch = Scratch::new();
-        let tree = tree(&scratch, "620.11");
+        let tree = tree(&scratch, "625.11");
         let said =
-            reason(prepare(&host("620.11"), &sources(&scratch), &tree, &scratch.path("images")).unwrap());
-        assert!(said.contains("branch 620"));
+            reason(prepare(&host("625.11"), &sources(&scratch), &tree, &scratch.path("images")).unwrap());
+        assert!(said.contains("branch 625"));
     }
 
     #[test]

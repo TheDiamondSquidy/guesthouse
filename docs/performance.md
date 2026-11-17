@@ -2,7 +2,7 @@
 
 The Windows numbers here are from the Python prototype unless I say otherwise. The Linux numbers are from the device in this repo.
 
-The NVIDIA numbers were all measured on one machine: Ryzen 9 9950X3D, RTX 5090, Fedora 45, NVIDIA 615.78.08 on the host and 617.42 in Windows. Host driver 620 works for Windows guests too, and Linux guests still need 615.
+The NVIDIA numbers were all measured on one machine: Ryzen 9 9950X3D, RTX 5090, Fedora 45, NVIDIA 615.78.08 on the host and 617.42 in Windows. Host driver 620 works for Windows guests too, and 620.70.06 for Linux guests.
 
 ### Windows guests
 
