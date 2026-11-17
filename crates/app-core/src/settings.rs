@@ -80,6 +80,11 @@ fn video_budget_gib(dedicated: u64) -> u64 {
     card.saturating_sub((card / HOST_SHARE).max(HOST_MINIMUM_GIB))
 }
 
+/// The same for a card of this many MiB, as a Linux guest's device has to be told.
+pub(crate) fn video_budget_gib_of(card_mib: u64) -> u32 {
+    video_budget_gib(card_mib * MIB) as u32
+}
+
 /// What the daemon offers with no cap: the host's desktop needs the rest. 0 until setup knows the card.
 pub fn max_vram_gib(context: &Context) -> u32 {
     let mib = read_setup(context).get(CARD_MEMORY_FIELD).and_then(Value::as_u64).unwrap_or(0);

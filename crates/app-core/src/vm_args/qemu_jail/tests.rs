@@ -309,6 +309,7 @@ fn ubuntu_with_gpu(namespaces: bool) -> (Scratch, VmPlan) {
             pci: "0000:02:00.0".into(),
             minor: 0,
             render_node: Some("renderD128".into()),
+            memory_mib: None,
         },
     });
     let plan = VmPlan::new(&context, &machine, boot, slots::number(2), 0);

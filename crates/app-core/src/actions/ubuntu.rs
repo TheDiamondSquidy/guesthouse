@@ -380,7 +380,7 @@ mod tests {
             image: "/store/driver.iso".into(),
             allow_list: "/p/allow.txt".into(),
             sensor_daemon: "/p/nvfwd-sensord".into(),
-            card: ForwardedCard { pci: "0000:02:00.0".into(), minor: 0, render_node: None },
+            card: ForwardedCard { pci: "0000:02:00.0".into(), minor: 0, render_node: None, memory_mib: None },
         };
         plan_for(task.context, &task.machine, Boot::Ubuntu(boot))
     }

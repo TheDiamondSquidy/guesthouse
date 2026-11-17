@@ -133,6 +133,11 @@ fn card_memory_mib(address: &str) -> Option<u64> {
     parse_card_memory(&String::from_utf8_lossy(&said.stdout), address)
 }
 
+/// The card's video memory, asked of the driver now.
+pub(crate) fn memory_mib(address: &str) -> Option<u64> {
+    card_memory_mib(address)
+}
+
 /// Writes down the card for the daemon, by its PCI address, and how much memory it has for the video
 /// memory cap. It's the best supported card, and of those the first by address.
 pub fn remember_card(context: &Context) -> Result<()> {

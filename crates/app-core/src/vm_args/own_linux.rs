@@ -62,6 +62,10 @@ mod tests {
     }
 
     fn with_gpu() -> UbuntuBoot {
+        on_a_card_of(None)
+    }
+
+    fn on_a_card_of(memory_mib: Option<u64>) -> UbuntuBoot {
         UbuntuBoot::WithGpu {
             image: "/images/driver.iso".into(),
             allow_list: "/p/linux/allow.txt".into(),
@@ -70,8 +74,29 @@ mod tests {
                 pci: "0000:05:00.0".into(),
                 minor: 1,
                 render_node: Some("renderD130".into()),
+                memory_mib,
             },
         }
+    }
+
+    #[test]
+    fn a_machine_with_no_cap_gets_the_card_less_the_hosts_share() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let uncapped = |memory_mib| {
+            let machine = Machine {
+                kind: Kind::Plain,
+                linux_gpu: true,
+                ..Machine::new("fedora", "Fedora", "/m/fedora/disk.qcow2", "/m/fedora/vars.fd")
+            };
+            let boot = own(on_a_card_of(memory_mib));
+            VmPlan::new(&context, &machine, boot, slots::first(), machine.vram_gib).qemu_arguments()
+        };
+        assert!(!uncapped(None).iter().any(|word| word.contains("max-vram")), "the card's size isn't known");
+        assert!(uncapped(Some(32607)).iter().any(|word| word.ends_with(",max-vram=28G")));
+        assert!(uncapped(Some(8192)).iter().any(|word| word.ends_with(",max-vram=6G")));
+        let capped = plan(&context, own(on_a_card_of(Some(32607)))).qemu_arguments();
+        assert!(capped.iter().any(|word| word.ends_with(",max-vram=12G")), "a chosen cap stays");
     }
 
     fn own(gpu: UbuntuBoot) -> Boot {

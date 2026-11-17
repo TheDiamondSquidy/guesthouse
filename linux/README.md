@@ -105,13 +105,13 @@ A Linux guest gets the GPU the way a program of yours does. It can do what your 
 
 ## Limits
 
-Each is a setting on the device, so `-device nvfwd,...,max-vram=12G`. A value of 0 for the rate turns it off. A machine's video memory cap in the app becomes `max-vram`.
+Each is a setting on the device, so `-device nvfwd,...,max-vram=12G`. A value of 0 for the rate turns it off. A machine's video memory cap in the app becomes `max-vram`, and a machine with no cap gets the card's size less what the host keeps, as a Windows guest does.
 
 | Setting | Default | Past it |
 |---|---|---|
 | `max-call-rate` | 20,000 calls a second | the call waits on its own vCPU |
 | `max-call-burst` | 200,000 calls | the same |
-| `max-vram` | 8 GiB | out of memory, as on a full card |
+| `max-vram` | 8 GiB, and from the app the card less the host's share | out of memory, as on a full card |
 | `max-sysmem` | 8 GiB | out of memory |
 | `max-objects` | 65,536 | out of resources |
 | `max-maps` | 7,168 | mmap fails with ENOMEM |
