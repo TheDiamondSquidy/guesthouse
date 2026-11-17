@@ -180,8 +180,28 @@ fn list_disc(path: &str) -> Result<String> {
     Ok(text)
 }
 
+/// How far to look into a Windows disc.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// As far as its editions, which means reading through the install image: some gigabytes, and
+    /// minutes on a slow drive.
+    Editions,
+    /// Only that it's Windows.
+    Names,
+}
+
 /// Says what an ISO is.
 pub fn read_iso(path: &str) -> Result<Iso> {
+    read_disc(path, Look::Editions)
+}
+
+/// Says what an ISO is on a PC where a Windows disc makes a plain VM whatever its edition. The edition
+/// would change nothing there, so the install image isn't read.
+pub fn read_iso_for_plain_windows(path: &str) -> Result<Iso> {
+    read_disc(path, Look::Names)
+}
+
+fn read_disc(path: &str, look: Look) -> Result<Iso> {
     let listing = list_disc(path)?;
     let names: HashMap<String, &str> = listing
         .lines()
@@ -192,6 +212,9 @@ pub fn read_iso(path: &str) -> Result<Iso> {
     let Some(entry) = entry else {
         return Ok(read_ubuntu(&names).unwrap_or_else(|| Iso::plain("Not Windows")));
     };
+    if look == Look::Names {
+        return Ok(Iso::plain("Windows"));
+    }
     for (name, build, architecture) in wim_images(path, entry) {
         if name == WINDOWS_EDITION && build >= FIRST_WINDOWS_11_BUILD && architecture == WIM_AMD64 {
             return Ok(Iso { kind: Kind::Windows, title: format!("{name}, build {build}"), edition: name });
@@ -283,6 +306,20 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn where_windows_is_a_plain_vm_its_install_image_is_not_read() {
+        let scratch = Scratch::new();
+        // Not a WIM at all, so reading it would say it isn't Windows 11 Pro.
+        let windows = make_iso(&scratch, "windows", &[("sources/install.wim", b"never read")]);
+        let found = read_iso_for_plain_windows(&windows).unwrap();
+        assert_eq!((found.kind, found.title.as_str()), (Kind::Plain, "Windows"));
+        let package = "pool/main/l/linux-signed/linux-image-7.0.0-38-generic_7.0.0-38.38_amd64.deb";
+        let files: [(&str, &[u8]); 3] =
+            [("casper/vmlinuz", b"kernel"), ("casper/initrd", b"initrd"), (package, b"deb")];
+        let ubuntu = make_iso(&scratch, "server", &files);
+        assert_eq!(read_iso_for_plain_windows(&ubuntu).unwrap(), read_iso(&ubuntu).unwrap());
     }
 
     #[test]

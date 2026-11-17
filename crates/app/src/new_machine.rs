@@ -9,9 +9,9 @@ use guesthouse_app_core::account::{default_user, name_problem, password_problem}
 use guesthouse_app_core::card_choice::{CardChoice, default_choice, windows_card_choices};
 use guesthouse_app_core::defaults::{NO_GPU, account_name, sizes_for, suggested_name};
 use guesthouse_app_core::display::DriverPackage;
-use guesthouse_app_core::gpu_support::{kind_offered, plain_reason, ubuntu_note};
+use guesthouse_app_core::gpu_support::{kind_offered, plain_reason, read_disc, ubuntu_note};
 use guesthouse_app_core::host::{RamField, physical_cores};
-use guesthouse_app_core::iso::{Iso, read_iso};
+use guesthouse_app_core::iso::Iso;
 use guesthouse_app_core::library::{
     MAX_DISK_GIB, MIN_PLAIN_DISK_GIB, MIN_WINDOWS_DISK_GIB, NewMachine, create,
 };
@@ -254,9 +254,10 @@ impl NewMachineDialog {
         let context = self.0.window.context();
         let this = self.clone();
         let reading = path.clone();
+        let reader = context.clone();
         in_background(
             &context,
-            move || read_iso(&reading),
+            move || read_disc(&reader, &reading),
             move |result| {
                 // Another choice may have come since. Only the newest counts.
                 if this.0.iso_path.borrow().as_deref() != Some(&path) {

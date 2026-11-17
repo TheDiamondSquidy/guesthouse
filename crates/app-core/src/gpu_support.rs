@@ -4,6 +4,8 @@
 
 use crate::card_choice::windows_card_choices;
 use crate::context::Context;
+use crate::failure::Result;
+use crate::iso::{Iso, read_iso, read_iso_for_plain_windows};
 use crate::linux::layout::SEED_FOLDER;
 use crate::linux::{guest_sources, sensor_daemon};
 use crate::machine::Kind;
@@ -82,6 +84,15 @@ pub fn plain_reason(context: &Context, disc: Kind) -> &'static str {
         Kind::Windows if windows_card_choices(context).is_empty() => NO_WINDOWS_CARD,
         Kind::Linux if !ubuntu_install_ready(context) => NO_UBUNTU_INSTALL_YET,
         _ => "",
+    }
+}
+
+/// Says what the disc at `path` is, looking only as far as this PC has a use for.
+pub fn read_disc(context: &Context, path: &str) -> Result<Iso> {
+    if plain_reason(context, Kind::Windows).is_empty() {
+        read_iso(path)
+    } else {
+        read_iso_for_plain_windows(path)
     }
 }
 

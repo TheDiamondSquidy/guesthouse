@@ -7,9 +7,8 @@ use crate::card_choice::{default_choice, windows_card_choices};
 use crate::context::Context;
 use crate::defaults::{NO_GPU, account_name, sizes_for};
 use crate::failure::{Failure, Result};
-use crate::gpu_support::{kind_offered, plain_reason, ubuntu_note};
+use crate::gpu_support::{kind_offered, plain_reason, read_disc, ubuntu_note};
 use crate::host::{RamField, physical_cores};
-use crate::iso::read_iso;
 use crate::library::{NewMachine, create, delete, remove_entry};
 use crate::machine::{Kind, MIN_RAM_GIB, Machine, load};
 use crate::setup::checks::machine_gpu_warning;
@@ -40,7 +39,7 @@ fn whole_number(option: &str, text: &str) -> Result<u32> {
 
 /// What the disc becomes here, and what the dialog says of it.
 fn kind_of_disc(context: &Context, path: &str, wanted: Option<&str>, out: &mut dyn Write) -> Result<Kind> {
-    let found = read_iso(path)?;
+    let found = read_disc(context, path)?;
     let kind = kind_offered(context, found.kind);
     let reason = plain_reason(context, found.kind);
     let verdict = match kind {
