@@ -110,6 +110,8 @@ pub fn scratch_context(scratch: &Scratch) -> Context {
     context.udev_data = scratch.path("udev");
     // A test's PC has no card unless it makes one, whatever cards this PC has.
     context.drm_class = scratch.path("drm");
+    context.pci_devices = scratch.path("pci");
+    context.pci_names = scratch.path("pci.ids");
     context.reserve_memory = crate::guest_memory::GuestMemory::sized;
     // A test's pretend programs are shell scripts, which no jail would let run as they do.
     context.jail_offer = |_| crate::jailing::Offer::nothing();

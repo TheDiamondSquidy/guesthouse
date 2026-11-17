@@ -400,7 +400,9 @@ mod tests {
     #[test]
     fn a_gpu_machine_with_no_token_says_where_to_give_it_one() {
         let scratch = Scratch::new();
-        let (context, machine) = startable(&scratch);
+        let (mut context, machine) = startable(&scratch);
+        context.pci_names = scratch.write("pci.ids", crate::setup::cards::stand_in::NAMES);
+        crate::setup::cards::stand_in::fake_pci(&scratch, "0000:01:00.0", 0x2704, "0x10de", "0x030000");
         finish_setup(&context);
         let gpu = Machine { kind: Kind::Windows, ..machine };
         fs::create_dir_all(gpu.folder(&context)).unwrap();

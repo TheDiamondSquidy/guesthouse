@@ -60,11 +60,18 @@ jobs:
         run: |
           dnf -y install gcc git xz findutils which binutils pkgconf-pkg-config rust cargo gtk4-devel \
             libadwaita-devel tar zstd qemu-img p7zip p7zip-plugins genisoimage swtpm openssl \
-            openssh-clients bubblewrap util-linux
+            openssh-clients bubblewrap util-linux shadow-utils
+          # Some tests check that a file with no permissions can't be read, which root can do. The tests
+          # run as an ordinary user, as they do on a PC.
+          useradd --create-home tester
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: fedora-44
-      - run: cargo test --locked --workspace
+          shared-key: fedora-44-tests
+          cache-directories: /home/tester/.cargo
+      - name: Test
+        run: |
+          chown -R tester:tester "$GITHUB_WORKSPACE" /home/tester
+          runuser -u tester -- env HOME=/home/tester cargo test --locked --workspace
