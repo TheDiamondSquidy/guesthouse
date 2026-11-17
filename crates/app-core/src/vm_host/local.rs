@@ -8,6 +8,8 @@ use crate::guest_memory::GuestMemory;
 use crate::host::GIB;
 use crate::host_drives::OpenDrives;
 use crate::jailing;
+use crate::kept_logs;
+use crate::log::write_log;
 use crate::machine::{Machine, sorted_names};
 use crate::monitor::Command as Qmp;
 use crate::processes::{memory_taken, passt_pid, qemu_pid};
@@ -40,8 +42,12 @@ const SOUND_CHECK_SECONDS: &str = "3";
 const OLD_SHARED_FILES: [&str; 3] = ["iomem", "ram", "display"];
 /// These can only be left by an earlier run, and a stale socket would pass for a ready daemon.
 const STALE_FILES: [&str; 4] = ["vgpu.sock", "global.sock", "screen.sock", PASST_PID_FILE];
-/// The last run's logs are the only evidence of whatever made someone restart.
-const LOGS_TO_KEEP: [&str; 3] = [daemon::OUTPUT_FILE, "serial.log", "qemu.log"];
+/// Which machine a run folder's logs are from. Slots are shared, so the folder alone can't say, and
+/// a file older than the note is from an earlier run, maybe another machine's.
+pub const MACHINE_NOTE: &str = "run-machine";
+/// The last run's logs are the only evidence of whatever made someone restart. The note goes along,
+/// so the kept logs still say whose they are.
+const LOGS_TO_KEEP: [&str; 4] = [daemon::OUTPUT_FILE, "serial.log", "qemu.log", MACHINE_NOTE];
 const TPM_SOCKET: &str = "tpm.sock";
 /// A new VM hasn't booted yet, whatever an earlier one noted.
 const BOOTS_FILE: &str = "guesthouse-boots";
@@ -124,8 +130,10 @@ impl LocalHost<'_> {
     }
 
     /// QEMU with no daemon and no shared memory. Returns once its monitor answers.
-    fn start_plain(&self, plan: &VmPlan, drives: &OpenDrives) -> Result<()> {
+    fn start_plain(&self, plan: &VmPlan, machine: &Machine, drives: &OpenDrives) -> Result<()> {
         let _ = fs::remove_file(self.run_file(BOOTS_FILE));
+        self.keep_last_run();
+        fs::write(self.run_file(MACHINE_NOTE), &machine.id)?;
         // Whatever an earlier machine in this slot had to say about its jail isn't this one's, and
         // its passt, if one is somehow still there, goes before this one's is noted.
         jailing::write_note(&plan.run_folder, &plan.jail_note)?;
@@ -176,7 +184,17 @@ impl LocalHost<'_> {
         }
     }
 
-    fn clear_run_folder(&self) -> Result<()> {
+    /// The run that was in this slot, kept before its logs are rotated or written over, in case it
+    /// ended with nobody there to keep it.
+    fn keep_last_run(&self) {
+        if let Err(error) = kept_logs::keep_run(self.context, &self.context.run_folder(None)) {
+            let _ =
+                write_log(self.context, &format!("start: the last run's logs could not be kept: {error}"));
+        }
+    }
+
+    fn clear_run_folder(&self, machine: &Machine) -> Result<()> {
+        self.keep_last_run();
         for name in STALE_FILES {
             let _ = fs::remove_file(self.run_file(name));
         }
@@ -186,6 +204,8 @@ impl LocalHost<'_> {
                 fs::rename(&log, self.run_file(&format!("{name}.1")))?;
             }
         }
+        // The note goes first, as a report takes a file as this run's only if it changed after it.
+        fs::write(self.run_file(MACHINE_NOTE), &machine.id)?;
         File::create(self.run_file("serial.log"))?;
         Ok(())
     }
@@ -254,7 +274,7 @@ impl LocalHost<'_> {
         {
             return Err(Failure::new("The VM did not start: something is still running."));
         }
-        self.clear_run_folder()?;
+        self.clear_run_folder(machine)?;
         self.remove_old_shared_files();
         // The app's own copies close when this returns, and the memory goes back once both have gone.
         let memory =
@@ -284,7 +304,7 @@ impl VmHost for LocalHost<'_> {
         // Before anything is started, so a drive that can't be had leaves nothing running.
         let drives = OpenDrives::open(self.context, &plan.drives)?;
         if !plan.is_gpu() {
-            return self.start_plain(plan, &drives);
+            return self.start_plain(plan, machine, &drives);
         }
         if self.context.second_instance() {
             return Err(Failure::new(SECOND_INSTANCE_REFUSAL));
