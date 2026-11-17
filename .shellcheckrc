@@ -7,3 +7,6 @@ disable=SC2154
 disable=SC2034
 # Files that are sourced and not run, so they have no shebang.
 disable=SC2148
+# Helpers that take an argument some of the time. Shellcheck says it for the ones called with none.
+disable=SC2119
+disable=SC2120
