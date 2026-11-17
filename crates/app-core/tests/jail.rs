@@ -241,7 +241,7 @@ fn run_jailed(namespaces: bool, on: Case) -> bool {
             image: scratch.write("store/linux-driver/driver.iso", "the driver"),
             allow_list: scratch.write("program/linux/allow.txt", ""),
             sensor_daemon: scratch.write("qemu/build/nvfwd-sensord", ""),
-            card: ForwardedCard { pci: "0000:02:00.0".into(), minor: 0, render_node: None },
+            card: ForwardedCard { pci: "0000:02:00.0".into(), minor: 0, render_node: None, memory_mib: None },
         };
         (Machine { kind: Kind::Linux, vars: String::new(), ..own }, Boot::Ubuntu(gpu))
     } else {

@@ -40,6 +40,13 @@ impl VmPlan {
         ssh_port(self.slot)
     }
 
+    /// The machine's own cap, and without one the card less the host's share, as a Windows guest gets.
+    /// Left unsaid, the device stops at its own 8 GiB, whatever the card.
+    fn video_memory_cap(&self, card: &ForwardedCard) -> Option<String> {
+        let budget = card.memory_mib.map(crate::settings::video_budget_gib_of).filter(|gib| *gib > 0);
+        self.vram.clone().or_else(|| budget.map(|gib| format!("{gib}G")))
+    }
+
     fn monitors(&self) -> Vec<String> {
         let sockets = ["qmp.sock", "watch.sock", "input.sock", DISPLAY_SOCKET];
         let each = sockets.iter().flat_map(|socket| {
@@ -137,7 +144,7 @@ impl VmPlan {
                 self.in_run_folder(FRAMES_PREFIX),
                 card.pci,
                 card.minor,
-                self.vram.as_ref().map_or_else(String::new, |cap| format!(",max-vram={cap}"))
+                self.video_memory_cap(card).map_or_else(String::new, |cap| format!(",max-vram={cap}"))
             ),
         ])
     }
@@ -246,7 +253,7 @@ mod tests {
             image: "/images/driver.iso".into(),
             allow_list: "/p/allow.txt".into(),
             sensor_daemon: "/q/nvfwd-sensord".into(),
-            card: ForwardedCard { pci: pci.into(), minor, render_node: None },
+            card: ForwardedCard { pci: pci.into(), minor, render_node: None, memory_mib: None },
         })
     }
 
