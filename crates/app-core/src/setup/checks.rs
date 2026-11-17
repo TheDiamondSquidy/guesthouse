@@ -729,10 +729,12 @@ mod tests {
         fs::write(&context.driver_version_file, "615.90.01\n").unwrap();
         let found = check_ubuntu(&context, &["sh"]);
         assert!(found.state == CheckState::Warning && found.fix.contains("615.90.01"));
-        fs::write(&context.driver_version_file, "620.11\n").unwrap();
+        fs::write(&context.driver_version_file, "620.70.06\n").unwrap();
+        assert_eq!(check_ubuntu(&context, &["sh"]).state, CheckState::Ok);
+        fs::write(&context.driver_version_file, "625.11\n").unwrap();
         let found = check_ubuntu(&context, &["sh"]);
         assert!(
-            found.state == CheckState::Warning && found.text.contains("no GPU") && found.fix.contains("620")
+            found.state == CheckState::Warning && found.text.contains("no GPU") && found.fix.contains("625")
         );
         let found = check_ubuntu(&context, &["no-such-tool"]);
         assert!(found.state == CheckState::Warning && found.text.contains("no-such-tool"));
