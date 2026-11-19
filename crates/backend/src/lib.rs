@@ -85,6 +85,12 @@ pub trait Backend: Sized {
         size: u64,
     ) -> Result<(), BackendError>;
 
+    /// Whether video memory nothing has written yet reads as zero. Then an allocation that moves
+    /// before anything could have written it needs no copy, as zeroed pages hold the same.
+    fn new_video_memory_is_zero(&self) -> bool {
+        false
+    }
+
     /// Reads the first bytes of memory the GPU may have written, for telling one buffer from
     /// another. It may wait a moment, like [`Backend::preserve_contents`], and nothing else needing
     /// the copy engine is running. At most one small page.
@@ -96,6 +102,22 @@ pub trait Backend: Sized {
         _out: &mut [u8],
     ) -> Result<(), BackendError> {
         Err(BackendError::new("this backend can't read video memory"))
+    }
+
+    /// The most video memory this guest may hold, in bytes, when the card itself sets a limit under
+    /// what it told the guest it has: a card the host's desktop also draws on must keep room for it.
+    /// `None` leaves the limit to the person's own setting, or to none.
+    fn video_memory_cap(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether the display driver's slots may lie in the guest's own pages. A vendor's guest driver
+    /// that has the CPU lock nearly every allocation moves the slots there before the ring is
+    /// registered, and the core then reads their stamps from guest memory and has each frame copied
+    /// out of it. A backend whose slots stay in video memory says no, and a locked allocation is
+    /// then never taken for a slot.
+    fn slots_may_be_guest_pages(&self) -> bool {
+        false
     }
 
     /// Makes a GPU address space covering `ranges`.
@@ -155,6 +177,13 @@ pub trait Backend: Sized {
     /// GPU addresses the host must never choose, in every address space, because the vendor's
     /// driver has told the guest they are its own to use. The guest can still map there.
     fn kept_gpu_ranges(&self) -> &'static [GpuRange] {
+        &[]
+    }
+
+    /// GPU addresses past [`GPU_RANGES`] where the guest may map at addresses it chose itself, as the
+    /// vendor's driver expects the card's address space to reach them. The host never hands these
+    /// out, so whatever has to stay inside [`GPU_RANGES`], like the host's own mappings, still does.
+    fn guest_placed_gpu_ranges(&self) -> &'static [GpuRange] {
         &[]
     }
 
@@ -222,6 +251,12 @@ pub trait Backend: Sized {
     /// A backend whose card can be slow without being stuck says more here.
     fn work_patience(&self) -> Option<Duration> {
         None
+    }
+
+    /// Whether a context's submissions should come with the commands their message names. A backend
+    /// that says no gets none, and finds its commands in its driver's private data if anywhere.
+    fn runs_context_commands(&self) -> bool {
+        false
     }
 
     /// Prepares work without letting it run. [`WorkStart::Finished`] says nothing reached the GPU,
@@ -311,4 +346,10 @@ pub trait HostServices {
 
     /// A fence's value, by its guest physical address.
     fn fence_value(&self, fence: u64) -> Result<u64, MemoryError>;
+
+    /// The guest physical address of a monitored fence, by its GPU address, if the process of this
+    /// space holds a sync object with that fence. Only such a fence may be written for the guest.
+    fn monitored_fence(&self, _space: SpaceId, _gpu_address: u64) -> Option<u64> {
+        None
+    }
 }

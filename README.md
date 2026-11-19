@@ -43,6 +43,7 @@ Windows with the GPU has run on these:
 | RX 6700 XT | AMD, RDNA2 | Works |
 | RX 6700 | AMD, RDNA2 | Works |
 | RX 6600 XT | AMD, RDNA2 | Works |
+| Arc B580 | Intel, Battlemage | Experimental, on a tester's PC. The card draws Windows' desktop. See [Intel](docs/intel.md) |
 
 Nobody has tried these yet. They should work, most likely first:
 
@@ -141,7 +142,7 @@ cargo bench -p guesthouse-core   # the message path, in nanoseconds
 cargo run -p guesthouse-app      # needs GTK 4.16 and libadwaita 1.5 development files
 ```
 
-With GTK 4.14, add `--no-default-features` to leave out HDR. A plain build has no GPU backend, so add `--features guesthouse-daemon/nvidia,guesthouse-daemon/amd`. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
+With GTK 4.14, add `--no-default-features` to leave out HDR. A plain build has no GPU backend, so add `--features guesthouse-daemon/nvidia,guesthouse-daemon/amd,guesthouse-daemon/intel`. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
 
 ## Bring your own
 

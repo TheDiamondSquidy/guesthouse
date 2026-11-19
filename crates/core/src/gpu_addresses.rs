@@ -68,6 +68,9 @@ pub struct GpuAddresses {
     placed: Vec<(u64, u64)>,
     /// (start, end) of what the host took for itself.
     host: Vec<(u64, u64)>,
+    /// Past the ranges, where only the guest may choose addresses. See
+    /// `Backend::guest_placed_gpu_ranges`.
+    guest_only: &'static [GpuRange],
 }
 
 /// Where a request will accept addresses: from `from`, with everything ending by `to`.
@@ -131,7 +134,22 @@ impl GpuAddresses {
             hand_out,
             placed: Vec::new(),
             host: Vec::new(),
+            guest_only: &[],
         }
+    }
+
+    /// Also lets the guest map at addresses it chose in `ranges`, which are never handed out.
+    pub fn with_guest_only(self, ranges: &'static [GpuRange]) -> Self {
+        Self { guest_only: ranges, ..self }
+    }
+
+    /// Whether the guest may map `size` bytes at `address`, an address it chose: in the ranges, or
+    /// wholly in a range only the guest uses.
+    pub fn guest_may_map(&self, address: u64, size: u64) -> bool {
+        let in_guest_only = |range: &GpuRange| {
+            range.contains(address) && address.checked_add(size).is_some_and(|end| end <= range.end)
+        };
+        Self::in_a_range(address) || self.guest_only.iter().any(in_guest_only)
     }
 
     /// Takes `size` bytes: what was given back for this use, or new addresses, moving to the next
@@ -143,12 +161,26 @@ impl GpuAddresses {
 
     /// As [`GpuAddresses::take`], but only if what comes next lies in `window`. Nothing changes if not.
     pub fn take_within(&mut self, size: u64, align: u64, usage: AddressUse, window: Window) -> Option<u64> {
-        if let Some(spare) = self.spare(size, align, usage, window) {
+        self.take_clear_of(size, align, usage, window, &[])
+    }
+
+    /// As [`GpuAddresses::take_within`], stepping over `mapped`: (start, end) of what is mapped now in
+    /// any space. A guest can map pages of its own at addresses it chooses, inside a range that was
+    /// handed out for something else, and keep them there after that range was given back.
+    pub fn take_clear_of(
+        &mut self,
+        size: u64,
+        align: u64,
+        usage: AddressUse,
+        window: Window,
+        mapped: &[(u64, u64)],
+    ) -> Option<u64> {
+        if let Some(spare) = self.spare(size, align, usage, window, mapped) {
             return Some(spare);
         }
-        let Some(base) = self.next_clear(size, align, window) else {
+        let Some(base) = self.next_clear(size, align, window, mapped) else {
             let other = usage.last_resort()?;
-            return self.spare(size, align, other, window);
+            return self.spare(size, align, other, window, mapped);
         };
         self.next = base + size;
         if usage == AddressUse::Host {
@@ -157,20 +189,30 @@ impl GpuAddresses {
         Some(base)
     }
 
-    /// The newest range given back for this use that hasn't been placed over since.
-    fn spare(&mut self, size: u64, align: u64, usage: AddressUse, window: Window) -> Option<u64> {
+    /// The newest range given back for this use that hasn't been placed or mapped over since. One
+    /// that has stays on the shelf until it is clear again.
+    fn spare(
+        &mut self,
+        size: u64,
+        align: u64,
+        usage: AddressUse,
+        window: Window,
+        mapped: &[(u64, u64)],
+    ) -> Option<u64> {
         let spares = self.free.get_mut(&(usage, size, align))?;
         let usable = |base: &u64| {
-            window.holds(*base, size) && !self.placed.iter().any(|&range| overlaps(range, *base, size))
+            let blocked = |&range: &(u64, u64)| overlaps(range, *base, size);
+            window.holds(*base, size) && !self.placed.iter().any(blocked) && !mapped.iter().any(blocked)
         };
         let found = spares.iter().rposition(usable)?;
         Some(spares.remove(found))
     }
 
-    /// The first new address with room in `window`, past whatever the guest has placed.
-    fn next_clear(&self, size: u64, align: u64, window: Window) -> Option<u64> {
+    /// The first new address with room in `window`, past whatever the guest has placed or mapped.
+    fn next_clear(&self, size: u64, align: u64, window: Window, mapped: &[(u64, u64)]) -> Option<u64> {
+        let blocked = [self.placed.as_slice(), mapped].concat();
         let in_window = self.hand_out.iter().filter_map(|range| window.limit(range));
-        in_window.into_iter().find_map(|range| first_fit(&range, self.next, size, align, &self.placed))
+        in_window.into_iter().find_map(|range| first_fit(&range, self.next, size, align, &blocked))
     }
 
     /// Room in `window`, whatever has been handed out, clear of `taken` and of the host's own ranges.
@@ -203,7 +245,8 @@ impl GpuAddresses {
         &self.host
     }
 
-    /// Makes a range free for the same use again. Nothing may be mapped there now.
+    /// Makes a range free for the same use again. What the host mapped there must be gone; pages the
+    /// guest mapped there itself can stay, and keep it from being handed out until they go.
     pub fn give_back(&mut self, base: u64, size: u64, align: u64, usage: AddressUse) {
         self.free.entry((usage, size, align)).or_default().push(base);
     }
@@ -290,6 +333,26 @@ mod tests {
     }
 
     #[test]
+    fn a_spare_range_with_a_page_still_mapped_in_it_stays_on_the_shelf() {
+        let usage = AddressUse::Mapped;
+        let mut addresses = GpuAddresses::new();
+        addresses.give_back(PLACED_AT, 0x2_0000, ALLOCATION_ALIGN, usage);
+        let page = [(PLACED_AT + 0x1_0000, PLACED_AT + 0x2_0000)];
+        let taken = addresses.take_clear_of(0x2_0000, ALLOCATION_ALIGN, usage, Window::ANYWHERE, &page);
+        assert_ne!(taken, Some(PLACED_AT));
+        let again = addresses.take_clear_of(0x2_0000, ALLOCATION_ALIGN, usage, Window::ANYWHERE, &[]);
+        assert_eq!(again, Some(PLACED_AT));
+    }
+
+    #[test]
+    fn new_addresses_step_over_what_is_mapped() {
+        let mut addresses = GpuAddresses::new();
+        let page = [(0x400_0000, 0x401_0000)];
+        let taken = addresses.take_clear_of(0x1_0000, ALLOCATION_ALIGN, HOST, Window::ANYWHERE, &page);
+        assert_eq!(taken, Some(0x401_0000));
+    }
+
+    #[test]
     fn a_range_two_spaces_placed_stays_clear_until_both_let_go() {
         let mut addresses = GpuAddresses::new();
         addresses.place(0x400_0000, 0x1_0000);
@@ -332,6 +395,25 @@ mod tests {
         assert!(!addresses.reaches(far));
         assert_eq!(addresses.find_gap(far, 0x1000, ALLOCATION_ALIGN, &[]), None);
         assert!(addresses.reaches(Window::ANYWHERE));
+    }
+
+    const ABOVE: GpuRange = GpuRange { start: GPU_RANGES[1].end, end: 1 << 47 };
+
+    #[test]
+    fn with_no_guest_only_ranges_the_guest_maps_only_in_the_ranges() {
+        let addresses = GpuAddresses::new();
+        assert!(addresses.guest_may_map(GPU_RANGES[1].start, 0x1000));
+        assert!(!addresses.guest_may_map(0x255_f13c_0000, 0x1000));
+    }
+
+    #[test]
+    fn a_guest_only_range_takes_the_guests_own_addresses_but_none_are_handed_out_there() {
+        let mut addresses = GpuAddresses::new().with_guest_only(std::slice::from_ref(&ABOVE));
+        assert!(addresses.guest_may_map(0x255_f13c_0000, 0x1000));
+        assert!(!addresses.guest_may_map(ABOVE.end - 0x1000, 0x2000), "it ends past the range");
+        assert!(!addresses.guest_may_map(ABOVE.end, 0x1000));
+        assert!(!addresses.reaches(Window { from: ABOVE.start, to: ABOVE.end }));
+        assert!(addresses.take(GPU_RANGES[1].end, ALLOCATION_ALIGN, HOST).is_err());
     }
 
     #[test]

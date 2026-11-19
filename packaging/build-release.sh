@@ -422,7 +422,7 @@ stage_bundled() {
 # Each real backend the tree has goes in. With none, the daemon says it has none.
 daemon_features() {
     features=""
-    for vendor in nvidia amd; do
+    for vendor in nvidia amd intel; do
         [ ! -d "$REPO/crates/backend-$vendor" ] || features="$features${features:+,}guesthouse-daemon/$vendor"
     done
     [ -z "$features" ] || printf '%s' "--features $features"
@@ -435,12 +435,25 @@ write_symbol_needs() {
         grep -E '^(gtk|gdk|gsk|adw)_' | sort -u >"$OUT/stage/needs-symbols"
 }
 
+# What a tester of an Intel card sends with the daemon's log. The task program runs it, from the
+# folder it is itself in.
+stage_intel_probe() {
+    [ -d "$REPO/crates/backend-intel" ] || return 0
+    (cd "$REPO" && cargo build --release --locked -p guesthouse-backend-intel --bin intel-probe)
+    cp "${CARGO_TARGET_DIR:-$REPO/target}/release/intel-probe" "$OUT/stage/"
+}
+
 stage_app() {
     target_folder=${CARGO_TARGET_DIR:-$REPO/target}
     # shellcheck disable=SC2046 # empty, or the flag and its value
     (cd "$REPO" && cargo build --release --locked -p guesthouse-app -p guesthouse-app-core \
         -p guesthouse-daemon $(daemon_features))
+    # The lab's stand-in card is never in a build for people. Its switch's name is only in a daemon
+    # built with it.
+    ! grep -q -a GUESTHOUSE_INTEL_LAB_FAKE_CARD "$target_folder/release/guesthouse-daemon" ||
+        die "guesthouse-daemon was built with the lab's stand-in card, which is never in a release."
     mkdir -p "$OUT/stage"
+    stage_intel_probe
     for program in guesthouse guesthouse-check guesthouse-daemon guesthouse-jail guesthouse-share guesthouse-task guesthouse-vm \
         guesthouse-report; do
         cp "$target_folder/release/$program" "$OUT/stage/"

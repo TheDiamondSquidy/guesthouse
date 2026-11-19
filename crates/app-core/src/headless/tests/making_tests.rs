@@ -99,6 +99,42 @@ fn a_windows_disc_says_what_it_is_and_what_stops_it() {
     assert!(refusal.contains("driver"), "{refusal}");
 }
 
+/// The card is named by its address alone, as an AMD card is, so its maker has to come from the
+/// choice: an Intel card taken for AMD's would ask for AMD's driver.
+#[test]
+fn a_windows_machine_on_an_intel_card_is_made_for_intels_driver() {
+    let scratch = Scratch::new();
+    let mut context = with_cards(&scratch, &[]);
+    context.drm_class = scratch.path("drm");
+    context.install_room = Some(0);
+    crate::linux::amd::stand_in::fake_render_node(&scratch, 128, "0000:00:02.0", "0x8086", 0x64a0);
+    let data = wim(&["Windows 11 Pro"], 26300, 9);
+    let disc = make_iso(&scratch, "win", &[("sources/install.wim", &data)]);
+    let (out, result) = said(&context, &format!("new Arc --iso {disc} --amd-card 0000:00:02.0"));
+    assert!(failure_of(result).contains(crate::setup::intel::NO_INTEL_SETUP), "{out}");
+}
+
+/// A lab run names a recording of a tester's card. Then the card is offered as it would be on the
+/// tester's PC, and its driver is asked for as for any Intel card.
+#[test]
+fn a_recorded_intel_card_is_offered_when_one_is_named_and_wants_intels_driver() {
+    let scratch = Scratch::new();
+    let mut context = with_cards(&scratch, &[]);
+    context.drm_class = scratch.path("drm");
+    context.install_room = Some(0);
+    let data = wim(&["Windows 11 Pro"], 26300, 9);
+    let disc = make_iso(&scratch, "win", &[("sources/install.wim", &data)]);
+    let words = format!("new Arc --iso {disc} --amd-card 0000:03:00.0");
+    let without = failure_of(said(&context, &words).1);
+    assert!(!without.contains(crate::setup::intel::NO_INTEL_SETUP), "no Intel card unless named: {without}");
+    context.recorded_intel_card = Some(scratch.write("b580.card", crate::render_cards::tests::ARC_B580));
+    let (out, result) = said(&context, &words);
+    assert!(failure_of(result).contains(crate::setup::intel::NO_INTEL_SETUP), "{out}");
+    let nvidia = with_cards(&scratch, &[("0000:01:00.0", 0x2B85)]);
+    let refused = failure_of(said(&nvidia, &format!("new Rtx --iso {disc} --intel-driver /x.exe")).1);
+    assert_eq!(refused, "--intel-driver is for a Windows machine on an Intel card.");
+}
+
 #[test]
 fn a_machine_with_nothing_to_install_has_no_install_to_run() {
     let scratch = Scratch::new();
@@ -170,6 +206,17 @@ fn setup_stops_at_a_check_that_failed_and_says_which() {
     assert!(result.unwrap_err().0.starts_with("Windows with GPU-PV cannot run yet."));
     let said = String::from_utf8(out).unwrap();
     assert_eq!(said, "ok       KVM: fine\nfailed   NVIDIA card: fine\n         Plug one in.\n");
+}
+
+#[test]
+fn setup_on_a_pc_with_only_an_intel_card_has_nothing_to_do() {
+    let scratch = Scratch::new();
+    let context = with_cards(&scratch, &[]);
+    let intel = Check { part: Part::Intel, state: CheckState::Warning, ..passing("Intel card") };
+    let mut out = Vec::new();
+    setup_after(&context, &[passing("KVM"), intel], None, None, &mut out).unwrap();
+    let said = String::from_utf8(out).unwrap();
+    assert!(said.ends_with(&format!("{}\n", crate::setup::checks::INTEL_NEEDS_NO_SETUP)), "{said}");
 }
 
 #[test]

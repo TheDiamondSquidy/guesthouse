@@ -18,10 +18,18 @@ stand-in = ["dep:guesthouse-backend-standin"]
 nvidia = ["dep:guesthouse-backend-nvidia", "dep:serde_json", "dep:guesthouse-sensors"]
 # The AMD backend. With nvidia on as well, each run opens the card the app named for its guest.
 amd = ["dep:guesthouse-backend-amd", "dep:serde_json"]
+# The Intel backend. It runs the guest's work on the card through xe where the card passes its own
+# test at the start, and otherwise only logs what the guest's driver sends. With another backend on
+# as well, each run opens the card the app named, the same way.
+intel = ["dep:guesthouse-backend-intel", "dep:serde_json"]
+# For the lab only, never in a build for people: a recorded Intel card with
+# GUESTHOUSE_INTEL_LAB_FAKE_CARD=1 runs the work path against a stand-in for xe. See the Intel backend.
+intel-lab-fake-card = ["intel", "guesthouse-backend-intel/lab-fake-card"]
 
 [dependencies]
 guesthouse-backend.workspace = true
 guesthouse-backend-amd = { workspace = true, optional = true }
+guesthouse-backend-intel = { workspace = true, optional = true }
 guesthouse-backend-nvidia = { workspace = true, optional = true }
 guesthouse-backend-standin = { workspace = true, optional = true }
 guesthouse-core.workspace = true

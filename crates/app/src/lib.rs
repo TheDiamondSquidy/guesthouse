@@ -4,10 +4,10 @@
 //! thread through [`common::in_background`] or to a task, so nothing can hold up the window.
 
 pub mod about;
-pub mod amd_driver_row;
 pub mod application;
 pub mod common;
 pub mod disk_place_row;
+pub mod driver_row;
 pub mod log_dialog;
 pub mod login;
 pub mod new_machine;

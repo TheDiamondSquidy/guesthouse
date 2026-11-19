@@ -21,8 +21,9 @@ pub struct GpuRange {
 
 /// The ranges every address space covers. There is a hole around 4 GiB, where real drivers keep
 /// something of their own, and the ranges are big because one process can reserve gigabytes. They
-/// stop at 1 TiB because a ring entry can't reach past it. The core hands addresses out of these,
-/// and a backend may tell the guest's driver about them.
+/// stop at 1 TiB because an NVIDIA ring entry can't reach past it. The core hands addresses out of
+/// these, and a backend may tell the guest's driver about them. A backend whose card reaches further
+/// can let the guest place its own mappings past them, with `Backend::guest_placed_gpu_ranges`.
 pub const GPU_RANGES: [GpuRange; 2] = [
     GpuRange { start: 0x400_0000, end: 0x1_0000_0000 },
     GpuRange { start: 0x1_4000_0000, end: 0x100_0000_0000 },
@@ -243,6 +244,9 @@ pub struct VendorQuery<'a> {
     pub data: &'a [u8],
     /// The asking process is 32-bit, and so needs the 32-bit user-mode driver.
     pub process_is_32_bit: bool,
+    /// The program the asking process runs, by its file name, as `dwm.exe`, or empty when the guest
+    /// didn't say.
+    pub program: &'a str,
 }
 
 /// A registry value. `value_type` is `None` for the driver paths, which have no type to match.
@@ -259,6 +263,15 @@ pub enum WorkSource {
     Context,
 }
 
+/// Where a submission's commands are, as the guest's message gave them: a GPU address in the
+/// submission's space, and a length in bytes. A backend whose driver's private data names its
+/// commands itself has no use for this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandBuffer {
+    pub address: u64,
+    pub length: u32,
+}
+
 /// A submission, as the core understood it.
 #[derive(Debug, Clone, Copy)]
 pub struct Work<'a> {
@@ -273,6 +286,8 @@ pub struct Work<'a> {
     pub context_queues: u32,
     /// The vendor driver's private data.
     pub private: &'a [u8],
+    /// The commands the message itself names, for a message that names any.
+    pub commands: Option<CommandBuffer>,
     pub fence: u64,
     pub fence_gpu_address: u64,
     pub fence_value: u64,
@@ -304,6 +319,9 @@ pub enum WorkStart {
 pub enum Doorbell {
     /// The work is on its way to the GPU.
     Rung,
+    /// The work is on the GPU and runs until the guest ends it, as a ring fed from user mode does.
+    /// Its fence comes only then, so it is neither waited for nor a sign of a hang.
+    RungToStay,
     /// The driver refused it for now. Nothing changed, and the same doorbell should be rung again.
     NotYet,
 }

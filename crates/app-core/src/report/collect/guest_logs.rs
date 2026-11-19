@@ -21,8 +21,8 @@ const SECTION_START: &str = "=== ";
 const NAMES: &str = "names";
 const END: &str = "end";
 const LOG_START: &str = "log ";
-const GUEST_USER_MARK: &str = "<guest-user>";
-const GUEST_PC_MARK: &str = "<guest-pc>";
+pub(super) const GUEST_USER_MARK: &str = "<guest-user>";
+pub(super) const GUEST_PC_MARK: &str = "<guest-pc>";
 /// Accounts every Windows has, whose names are words in its own logs and say nothing of whose it is.
 const BUILT_IN_ACCOUNTS: [&str; 4] = ["Administrator", "Guest", "DefaultAccount", "WDAGUtilityAccount"];
 const NEEDS_RUNNING: &str = "Logs from inside the guest need the machine running, so there are none here.";
@@ -220,5 +220,41 @@ mod tests {
         add_answer(&mut found, "");
         assert_eq!(found.items.len(), 0);
         assert!(found.missing[0].reason.contains("gave no answer"));
+    }
+
+    /// The repo's own script, as no PowerShell runs here to try it: it has to ask for what says why
+    /// Windows stopped a display device, which the display stack's own providers in System never do.
+    #[test]
+    fn the_script_asks_for_why_a_display_device_was_stopped() {
+        let script =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guest/report.ps1")).unwrap();
+        for wanted in [
+            "'Microsoft-Windows-Kernel-PnP'",
+            "@(411, 219)",
+            r"'WUDFRd*ROOT\DISPLAY\*0xC0000365'",
+            "'Microsoft-Windows-DxgKrnl-Admin'",
+            "'Microsoft-Windows-DxgKrnl-Operational'",
+            "$lines -join ' | '",
+            "Get-PnpDevice -Class Display",
+            "DEVPKEY_Device_ProblemStatus",
+            "ConfigManagerErrorCode",
+        ] {
+            assert!(script.contains(wanted), "report.ps1 lacks {wanted}");
+        }
+        assert!(script.contains("Select-Object -First $mostEvents"), "still bounded");
+    }
+
+    #[test]
+    fn a_plug_and_play_event_keeps_its_problem_and_the_guests_names_go() {
+        let mut found = Collection::default();
+        let event = "2026-11-17T19:30:00 Microsoft-Windows-Kernel-PnP 411 Error: Device PCI\\VEN_1414&DEV_008E had a \
+                     problem starting. | Driver Name: oem12.inf | Problem: 0x2B | Problem Status: 0xC00000E5 | on DESKTOP-QUILL7";
+        add_answer(
+            &mut found,
+            &format!("=== names\r\nDESKTOP-QUILL7\r\nquillon\r\n=== events\r\n{event}\r\n=== end\r\n"),
+        );
+        let events = &found.items[0].text;
+        assert!(events.contains("Problem Status: 0xC00000E5"), "{events}");
+        assert!(!events.contains("QUILL7"), "{events}");
     }
 }

@@ -621,6 +621,93 @@ fn destroying_a_slot_ends_the_ring() {
     assert_eq!(frame(&mut session, None).0, STATUS_STALE);
 }
 
+/// A guest whose driver has the CPU lock every slot, as Intel's does, and stamps them where they
+/// then lie: in the guest's own pages.
+fn stamped_after_locking() -> (TestSession, Vec<u32>) {
+    let (mut session, buffers) = stamped(NAME.generation + 7);
+    for (slot, &handle) in buffers.iter().enumerate() {
+        let (status, address) = lock(&mut session, handle);
+        assert_eq!(status, SUCCESS);
+        let stamp = driver::stamp(Stamp { generation: NAME.generation, slot: slot as u32 });
+        for (at, word) in stamp.chunks(8).enumerate() {
+            let word = u64::from_le_bytes(word.try_into().unwrap());
+            session.memory_mut().write_u64(address + at as u64 * 8, word).unwrap();
+        }
+    }
+    (session, buffers)
+}
+
+#[test]
+fn locked_slots_are_never_taken_for_a_ring_unless_the_backend_says_they_may_be() {
+    let (mut session, _) = stamped_after_locking();
+    let (status, first) = register(&mut session, &ring(Look::SDR));
+    assert_eq!((status, first), (STATUS_REFUSED, None));
+    assert!(session.frames.indirect.is_none());
+}
+
+#[test]
+fn a_backend_whose_slots_may_be_guest_pages_has_their_stamps_read_there() {
+    let (mut session, buffers) = stamped_after_locking();
+    session.backend_mut().slots_in_guest_pages = true;
+    let (status, first) = register(&mut session, &ring(Look::SDR));
+    assert_eq!(status, STATUS_OK);
+    assert!(first.is_some());
+    let slots = &session.frames.indirect.as_ref().unwrap().slots;
+    let found: Vec<u32> = slots.iter().map(|slot| slot.allocation).collect();
+    assert_eq!(found, buffers, "by the stamps in guest memory, not by the stale ones on the card");
+}
+
+/// A ring whose slots are in guest pages, one frame waiting, and a viewer of this kind watching.
+fn watched_in_guest_pages(viewer: ViewerFacts) -> (TestSession, Sink) {
+    let (mut session, _) = stamped_after_locking();
+    session.backend_mut().slots_in_guest_pages = true;
+    let first = register(&mut session, &ring(Look::SDR)).1.expect("a slot");
+    frame(&mut session, Some(first));
+    let _ = session.poll(Instant::now());
+    session.viewer_arrived();
+    session.viewer_described(viewer);
+    let mut sink = Sink::default();
+    turn(&mut session, &mut sink);
+    turn(&mut session, &mut sink);
+    (session, sink)
+}
+
+#[test]
+fn frames_in_guest_pages_reach_a_viewer_on_the_card_through_slots_made_on_the_card() {
+    let (session, sink) = watched_in_guest_pages(ViewerFacts::default());
+    assert_eq!(sink.rings.len(), 1);
+    // The viewer didn't ask for memory, so it must not be handed any: it would import it as the
+    // card's buffers.
+    assert!(session.memory().host_buffers.is_empty());
+    let ring = session.frames.ring.as_ref().unwrap();
+    assert_eq!(ring.memory.len(), SLOTS as usize, "slots of the viewer's own, in video memory");
+    assert_eq!((sink.frames.len(), session.backend().slot_copies.len()), (1, 1));
+    assert_eq!(sink.frames[0].tiling, None, "in rows");
+    assert!(!session.frames.indirect.as_ref().unwrap().export_refused);
+}
+
+#[test]
+fn frames_in_guest_pages_reach_a_viewer_on_another_gpu_through_memory_here() {
+    let viewer = ViewerFacts { wants_memory: true, ..ViewerFacts::default() };
+    let (session, sink) = watched_in_guest_pages(viewer);
+    assert_eq!(session.memory().host_buffers.len(), SLOTS as usize);
+    assert_eq!((sink.rings.len(), sink.frames.len(), session.backend().slot_copies.len()), (1, 1, 1));
+}
+
+#[test]
+fn guest_page_slots_whose_copies_cant_be_exported_leave_the_viewer_nothing_and_say_so() {
+    let (mut session, _) = stamped_after_locking();
+    session.backend_mut().slots_in_guest_pages = true;
+    register(&mut session, &ring(Look::SDR));
+    session.backend_mut().refuse_exports = true;
+    session.viewer_arrived();
+    session.viewer_described(ViewerFacts::default());
+    let mut sink = Sink::default();
+    turn(&mut session, &mut sink);
+    assert!(session.frames.indirect.as_ref().unwrap().export_refused);
+    assert!(session.memory().host_buffers.is_empty());
+}
+
 #[test]
 fn a_slot_whose_memory_moved_ends_the_ring() {
     let (mut session, buffers) = stamped(1);

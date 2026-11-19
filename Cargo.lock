@@ -742,6 +742,7 @@ dependencies = [
 name = "guesthouse-app-core"
 version = "0.6.2"
 dependencies = [
+ "guesthouse-backend-intel",
  "guesthouse-backend-nvidia",
  "guesthouse-card-check",
  "guesthouse-daemon",
@@ -767,6 +768,18 @@ name = "guesthouse-backend-amd"
 version = "0.6.2"
 dependencies = [
  "guesthouse-backend",
+ "guesthouse-messages",
+ "libc",
+ "log",
+]
+
+[[package]]
+name = "guesthouse-backend-intel"
+version = "0.6.2"
+dependencies = [
+ "guesthouse-backend",
+ "guesthouse-backend-standin",
+ "guesthouse-core",
  "guesthouse-messages",
  "libc",
  "log",
@@ -818,6 +831,7 @@ version = "0.6.2"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-amd",
+ "guesthouse-backend-intel",
  "guesthouse-backend-nvidia",
  "guesthouse-backend-standin",
  "guesthouse-core",

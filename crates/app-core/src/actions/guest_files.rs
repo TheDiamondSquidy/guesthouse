@@ -4,11 +4,18 @@
 
 use super::Task;
 use super::desktop::{GUEST_FOLDER, put_guest_file};
+use super::driver_store::HOST_DRIVER_STORE;
+use super::guest_upload::quoted;
 use crate::agent::guest_script;
 use crate::failure::Result;
+use crate::gpu_identity::INTEL_RENDER;
 use crate::log::write_log;
+use crate::setup::guest_driver::INTEL_STORE_FOLDER;
 use crate::setup::guest_files::guest_file_list;
+use crate::setup::intel::{SYSTEM_LIST, intel_driver_folder};
 use crate::text::base64_encode;
+use guesthouse_backend_intel::protocol::record::{DEVICE_KEY, DEVICE_KEY_VALUES};
+use std::fs;
 
 const SCRIPT_NAME: &str = "nv-files.ps1";
 const PROFILES_SCRIPT: &str = "nv-profiles.ps1";
@@ -19,6 +26,15 @@ const CHECK_SECONDS: u64 = 20;
 const PLACE_SECONDS: u64 = 110;
 const MISSING_MARK: &str = "missing ";
 const FAILED_MARK: &str = "FAILED";
+const KEY_SECONDS: u64 = 20;
+const KEY_MARK: &str = "device key set";
+/// Where the display devices' software keys are, each named by its device's driver property.
+const DISPLAY_CLASS_KEYS: &str = r"HKLM:\SYSTEM\CurrentControlSet\Control\Class\";
+/// What the Level Zero loader reads from a display device's software key, and Intel's driver it names.
+const LEVEL_ZERO_VALUE: &str = "LevelZeroDriverPath";
+const LEVEL_ZERO_DRIVER: &str = "ze_intel_gpu64.dll";
+/// Where Windows keeps what a 32-bit program sees as SOFTWARE.
+const SOFTWARE_32: (&str, &str) = (r"SOFTWARE\", r"SOFTWARE\WOW6432Node\");
 const NO_SCRIPT: &str = "Windows lacks some of the driver's files, so a program that looks for them may crash. \
                          This install has no script to place them.";
 
@@ -48,9 +64,11 @@ fn count_missing(task: &Task) -> Option<u32> {
     said.split(MISSING_MARK).nth(1)?.trim().parse().ok()
 }
 
-fn run_placing_script(task: &Task) -> String {
+/// `store` names the driver's folder in the guest's driver store, where NVIDIA's is the script's own.
+fn run_placing_script(task: &Task, store: Option<&str>) -> String {
     let (script, list, log) = (guest_path(SCRIPT_NAME), guest_path(LIST_NAME), guest_path(LOG_NAME));
-    task.ask_guest(&format!("& {script} {list} | Tee-Object {log}"), PLACE_SECONDS)
+    let store = store.map(|name| format!(" -StoreFolder {name}")).unwrap_or_default();
+    task.ask_guest(&format!("& {script} {list}{store} | Tee-Object {log}"), PLACE_SECONDS)
 }
 
 /// The folder NVIDIA's settings store lives in, with the driver's own profile database in it. A guest
@@ -82,8 +100,75 @@ pub(super) fn place_driver_files(task: &mut Task) -> Result<()> {
             return Ok(());
         }
     };
+    place_listed_files(task, &list, None)
+}
+
+/// What Intel's INF puts in the system folders, from the list unpacked with its driver: the loaders
+/// the guest's programs find Intel's OpenCL, Vulkan and Level Zero drivers through. A guest that
+/// has them all is left alone.
+pub(super) fn place_system_files(task: &mut Task) -> Result<()> {
+    let list = intel_driver_folder(task.context)
+        .and_then(|folder| fs::read_to_string(folder.join(SYSTEM_LIST)).ok());
+    match list.filter(|list| !list.trim().is_empty()) {
+        Some(list) => place_listed_files(task, &list, Some(INTEL_STORE_FOLDER)),
+        None => {
+            write_log(task.context, "driver files: Intel's driver has no list of system files")?;
+            Ok(())
+        }
+    }
+}
+
+/// The registry key the Intel adapter's record names as the device's, with the values Intel's OpenCL
+/// and Level Zero drivers look for in it. Without them they offer no device. Windows shows a 32-bit
+/// program another SOFTWARE key, so the key goes in both.
+///
+/// The Level Zero loader finds its driver another way: it reads LevelZeroDriverPath from the software
+/// key of each display device present, which Intel's INF would have written. In the guest that is the
+/// key Windows made for the render device with Intel's identity, so the path goes there too.
+fn device_key_script() -> String {
+    let key_script = |path: &str| {
+        let key = quoted(&format!(r"HKLM:\{path}"));
+        let values: String = DEVICE_KEY_VALUES
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "New-ItemProperty -Path {key} -Name {} -PropertyType String -Value {} -Force -ea Stop | Out-Null; ",
+                    quoted(name),
+                    quoted(value)
+                )
+            })
+            .collect();
+        format!("New-Item -Path {key} -Force -ea Stop | Out-Null; {values}")
+    };
+    let keys = key_script(DEVICE_KEY) + &key_script(&DEVICE_KEY.replacen(SOFTWARE_32.0, SOFTWARE_32.1, 1));
+    let level_zero = format!(
+        "Get-PnpDevice -PresentOnly -Class Display -ea Stop | Where-Object {{ $_.HardwareID -like {} }} | \
+         ForEach-Object {{ $key = {} + (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_Driver -ea Stop).Data; \
+         New-ItemProperty -Path $key -Name {} -PropertyType String -Value {} -Force -ea Stop | Out-Null }}; ",
+        quoted(&INTEL_RENDER.windows_pattern()),
+        quoted(DISPLAY_CLASS_KEYS),
+        quoted(LEVEL_ZERO_VALUE),
+        quoted(&format!(r"{HOST_DRIVER_STORE}\{INTEL_STORE_FOLDER}\{LEVEL_ZERO_DRIVER}")),
+    );
+    format!("try {{ {keys}{level_zero}'{KEY_MARK}' }} catch {{ \"$_\" }}")
+}
+
+/// Windows is up by now, so a key that doesn't take is said and doesn't stop the machine.
+pub(super) fn write_device_key(task: &mut Task) -> Result<()> {
+    let said = task.ask_guest(&device_key_script(), KEY_SECONDS);
+    if !said.contains(KEY_MARK) {
+        write_log(task.context, &format!("device key: {}", said.trim()))?;
+        task.error =
+            "Intel's compute drivers will find no GPU, as their registry key did not reach Windows. \
+                      The log says why."
+                .to_owned();
+    }
+    Ok(())
+}
+
+fn place_listed_files(task: &mut Task, list: &str, store: Option<&str>) -> Result<()> {
     task.step("Checking the driver's files");
-    send_list(task, &list);
+    send_list(task, list);
     if count_missing(task).is_none_or(|count| count == 0) {
         return Ok(());
     }
@@ -94,10 +179,30 @@ pub(super) fn place_driver_files(task: &mut Task) -> Result<()> {
     }
     task.step("Placing the driver's files");
     put_guest_file(task, SCRIPT_NAME, &guest_path(SCRIPT_NAME))?;
-    let said = run_placing_script(task);
+    let said = run_placing_script(task, store);
     write_log(task.context, &format!("driver files: {}", said.trim()))?;
     if said.contains(FAILED_MARK) {
         task.error = "Some of the driver's files did not reach Windows. The log says which.".to_owned();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_device_key_script_makes_the_key_and_writes_each_value_as_text() {
+        let script = device_key_script();
+        assert!(script.contains(r"New-Item -Path 'HKLM:\SOFTWARE\Guesthouse\Intel adapter' -Force"));
+        assert!(
+            script.contains(r"New-Item -Path 'HKLM:\SOFTWARE\WOW6432Node\Guesthouse\Intel adapter' -Force")
+        );
+        assert!(script.contains("-Name 'OpenCLDriverName' -PropertyType String -Value 'igdrcl64.dll'"));
+        assert!(script.contains(&format!("'{KEY_MARK}' }}")), "the mark comes only after the writes");
+        assert!(script.contains(r"-like 'PCI\VEN_8086&DEV_CFFE*'"), "{script}");
+        assert!(script.contains(
+            r"-Name 'LevelZeroDriverPath' -PropertyType String -Value 'C:\Windows\System32\HostDriverStore\FileRepository\iigd_dch.inf_amd64_gpupv\ze_intel_gpu64.dll'"
+        ));
+    }
 }

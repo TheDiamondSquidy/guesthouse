@@ -4,9 +4,11 @@ use super::{Stopped, VmHost};
 use crate::context::Context;
 use crate::daemon::{self, DaemonStart, detached, is_own_daemon};
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::GuestMemory;
 use crate::host::GIB;
 use crate::host_drives::OpenDrives;
+use crate::intel_desktop;
 use crate::jailing;
 use crate::kept_logs;
 use crate::log::write_log;
@@ -41,7 +43,9 @@ const SOUND_CHECK_SECONDS: &str = "3";
 /// What versions before the memfds left in shared memory, which goes once nothing holds it.
 const OLD_SHARED_FILES: [&str; 3] = ["iomem", "ram", "display"];
 /// These can only be left by an earlier run, and a stale socket would pass for a ready daemon.
-const STALE_FILES: [&str; 4] = ["vgpu.sock", "global.sock", "screen.sock", PASST_PID_FILE];
+/// The daemon writes the desktop note again at each start, but the app reads it before then.
+const STALE_FILES: [&str; 5] =
+    ["vgpu.sock", "global.sock", "screen.sock", PASST_PID_FILE, guesthouse_daemon::desktop_note::NOTE_FILE];
 /// Which machine a run folder's logs are from. Slots are shared, so the folder alone can't say, and
 /// a file older than the note is from an earlier run, maybe another machine's.
 pub const MACHINE_NOTE: &str = "run-machine";
@@ -284,8 +288,11 @@ impl LocalHost<'_> {
         if !choice.daemon_jailed {
             start = start.without_jail();
         }
-        if let Some(pci) = machine.windows_amd_card() {
-            start = start.on_amd_card(pci);
+        if let Some(maker) = machine.windows_maker() {
+            start = start.on_card(maker, &machine.amd_gpu)?;
+            if maker == GpuMaker::Intel {
+                start = start.with_intel_desktop(intel_desktop::for_start(self.context, machine));
+            }
         }
         let mut daemon = start.spawn(&plan.run_folder, &memory)?;
         self.wait_for_daemon(&mut daemon)?;

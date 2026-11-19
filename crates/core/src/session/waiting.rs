@@ -133,7 +133,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let one = [handle];
         let queues = self.context_queues.get(&handle).map_or(&one[..], Vec::as_slice);
         queues.iter().filter_map(|queue| self.queues.get(queue)).all(|queue| {
-            let live = queue.last_fence.is_some() && !queue.failed;
+            let live = queue.last_fence.is_some() && !queue.failed && !queue.stays;
             !live || visit(queue)
         })
     }
@@ -391,12 +391,32 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
+    /// Notes that a queue's work may have written what is mapped in its address space.
+    fn space_written(&mut self, queue: u32) {
+        if let Some(record) = self.queues.get(&queue) {
+            *self.space_writes.entry(record.space).or_insert(0) += 1;
+        }
+    }
+
     /// Rings a doorbell. False if the backend refused it for now, and it must be rung again.
     fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) -> bool {
+        self.space_written(queue);
         match self.backend.ring_doorbell(queue, doorbell) {
             Ok(Doorbell::Rung) => {
                 self.timings.mark(Stage::Rung);
+                if let Some(record) = self.queues.get_mut(&queue) {
+                    record.stays = false;
+                }
                 self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
+            }
+            // Work that runs until the guest ends it reaches its fence only then. A watch would
+            // call that a hang, and take a healthy program off the GPU.
+            Ok(Doorbell::RungToStay) => {
+                self.timings.mark(Stage::Rung);
+                if let Some(record) = self.queues.get_mut(&queue) {
+                    record.stays = true;
+                    self.ring_spaces.insert(record.space);
+                }
             }
             Ok(Doorbell::NotYet) => return false,
             Err(error) => {
@@ -646,6 +666,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         queue: u32,
         source: guesthouse_backend::WorkSource,
         private: &[u8],
+        commands: Option<guesthouse_backend::CommandBuffer>,
         value: u64,
     ) -> GpuTook {
         let Some(record) = self.queues.get(&queue) else { return GpuTook::Nothing };
@@ -658,6 +679,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             client_hint: self.context_hints.get(&record.context).copied().unwrap_or(0),
             context_queues: self.context_queues.get(&record.context).map_or(1, |queues| queues.len() as u32),
             private,
+            commands,
             fence,
             fence_gpu_address,
             fence_value: value,
@@ -673,6 +695,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             WorkStart::Finished => GpuTook::Nothing,
             WorkStart::Ran => {
                 self.work_started += 1;
+                self.space_written(queue);
                 GpuTook::Nothing
             }
             WorkStart::Busy => GpuTook::NoRoom,
@@ -682,6 +705,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             }
             WorkStart::Started { doorbell, work } => {
                 self.work_started += 1;
+                self.space_written(queue);
                 self.queues.get_mut(&queue).expect("read above").last_fence = Some(value);
                 self.ring_or_hold(queue, doorbell, fence, value);
                 GpuTook::Work(work)

@@ -1,10 +1,11 @@
 //! `guesthouse-daemon [PROJECT_FOLDER]`: serves one VM, named by `GUESTHOUSE_SLOT`.
 //!
-//! The real backends are behind the `nvidia` and `amd` features. Each run opens one card: the AMD
-//! card named in `GUESTHOUSE_AMD_CARD` if the app named one, and else the NVIDIA card setup chose.
-//! A build with only `amd` takes its card from the AMD setup file when none is named. A build with
-//! no backend can only say so. The `stand-in` feature answers messages with nothing
-//! behind them, to try the sockets by hand.
+//! The real backends are behind the `nvidia`, `amd` and `intel` features. Each run opens one card:
+//! the AMD card named in `GUESTHOUSE_AMD_CARD` or the Intel card named in `GUESTHOUSE_INTEL_CARD` if
+//! the app named one, and else the NVIDIA card setup chose. A build without `nvidia` takes its card
+//! from the AMD setup file when none is named, or with no `amd` either, from the Intel one. A build
+//! with no backend can only say so. The `stand-in` feature answers messages with nothing behind
+//! them, to try the sockets by hand.
 
 use guesthouse_daemon::logger;
 use guesthouse_daemon::slot::Slot;
@@ -32,21 +33,24 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(not(any(feature = "stand-in", feature = "nvidia", feature = "amd")))]
+#[cfg(not(any(feature = "stand-in", feature = "nvidia", feature = "amd", feature = "intel")))]
 fn serve(_slot: Slot, _project: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Err("This build has no GPU backend in it, so it cannot run a guest.".into())
 }
 
 /// Serves on the card the app chose for this guest.
-#[cfg(any(feature = "nvidia", feature = "amd"))]
+#[cfg(any(feature = "nvidia", feature = "amd", feature = "intel"))]
 fn serve(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    match guesthouse_daemon::card_choice::amd_card()? {
-        Some(card) => serve_amd(slot, project, Some(card)),
-        None => serve_nvidia(slot, project),
+    use guesthouse_daemon::card_choice::{amd_card, intel_card};
+    match (amd_card()?, intel_card()?) {
+        (Some(_), Some(_)) => Err("This guest was given both an AMD card and an Intel card.".into()),
+        (Some(card), None) => serve_amd(slot, project, Some(card)),
+        (None, Some(card)) => serve_intel(slot, project, Some(card)),
+        (None, None) => serve_nvidia(slot, project),
     }
 }
 
-#[cfg(all(feature = "nvidia", not(feature = "amd")))]
+#[cfg(all(any(feature = "nvidia", feature = "intel"), not(feature = "amd")))]
 fn serve_amd(
     _slot: Slot,
     _project: PathBuf,
@@ -55,10 +59,25 @@ fn serve_amd(
     Err("This daemon was built without the AMD backend, so it cannot run a guest on an AMD card.".into())
 }
 
+#[cfg(all(any(feature = "nvidia", feature = "amd"), not(feature = "intel")))]
+fn serve_intel(
+    _slot: Slot,
+    _project: PathBuf,
+    _card: Option<guesthouse_backend::PciAddress>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("This daemon was built without the Intel backend, so it cannot run a guest on an Intel card.".into())
+}
+
 /// With no NVIDIA backend, a guest with no card named is on the card in the AMD setup file.
 #[cfg(all(feature = "amd", not(feature = "nvidia")))]
 fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     serve_amd(slot, project, None)
+}
+
+/// With neither the NVIDIA nor the AMD backend, it is on the card in the Intel setup file.
+#[cfg(all(feature = "intel", not(feature = "nvidia"), not(feature = "amd")))]
+fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    serve_intel(slot, project, None)
 }
 
 /// Starts the AMD backend on `card`, or with none, on the card in the AMD setup file, and serves.
@@ -69,18 +88,10 @@ fn serve_amd(
     project: PathBuf,
     card: Option<guesthouse_backend::PciAddress>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use guesthouse_backend::Backend;
     use guesthouse_backend_amd::AmdBackend;
-    use guesthouse_core::{Config, MemoryLimits, Session};
-    use guesthouse_daemon::amd_setup::read_setup;
-    use guesthouse_daemon::environment::{guest_ram, video_cap};
-    use guesthouse_daemon::guest_memory::SharedMemory;
-    use guesthouse_daemon::jail::{Needs, lock_calls, lock_files};
-    use guesthouse_daemon::router::Router;
-    use guesthouse_daemon::server::Server;
-    use guesthouse_daemon::startup::start_backend;
+    use guesthouse_daemon::vendor_setup::AMD;
 
-    let mut setup = read_setup()?;
+    let mut setup = AMD.read()?;
     if card.is_some() {
         setup.card_address = card;
     }
@@ -88,19 +99,97 @@ fn serve_amd(
     let node = guesthouse_backend_amd::amd_render_node(address.as_deref())
         .ok_or("No AMD graphics card was found at the address this guest was given.")?;
     log::info!("AMD card at {}", node.display());
+    let memory_device = PathBuf::from(guesthouse_backend_amd::Udmabuf::DEVICE);
+    let memory_device = memory_device.exists().then_some(memory_device);
+    let needs = guesthouse_daemon::jail::Needs::of_render_node(
+        slot,
+        &project,
+        &setup.driver_folder,
+        node,
+        memory_device,
+    );
+    let run_folder = slot.run_folder(&project);
+    serve_on_render_node::<AmdBackend>(slot, project, &setup, needs, |backend| {
+        if env::var_os(guesthouse_backend_amd::IB_DUMP_VARIABLE).is_some() {
+            backend.keep_command_buffers(&run_folder, guesthouse_daemon::logger::started());
+        }
+    })
+}
+
+/// Starts the Intel backend on `card`, or with none, on the card in the Intel setup file, and
+/// serves. This opens that Intel card and no other.
+#[cfg(feature = "intel")]
+fn serve_intel(
+    slot: Slot,
+    project: PathBuf,
+    card: Option<guesthouse_backend::PciAddress>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use guesthouse_backend_intel::IntelBackend;
+    use guesthouse_daemon::jail::Needs;
+    use guesthouse_daemon::vendor_setup::INTEL;
+
+    let mut setup = INTEL.read()?;
+    if card.is_some() {
+        setup.card_address = card;
+    }
+    // A recording a person named stands in for the card, and then no card is looked for or opened.
+    let needs = match guesthouse_backend_intel::recording::recorded_card_file() {
+        Some(recording) => Needs::of_recorded_card(slot, &project, &setup.driver_folder, recording),
+        None => {
+            let address = setup.card_address.map(|pci| pci.to_string());
+            let node = guesthouse_backend_intel::intel_render_node(address.as_deref()).ok_or(
+                "No Intel graphics card on the xe driver was found at the address this guest was given.",
+            )?;
+            log::info!("Intel card at {}", node.device_file.display());
+            // Intel's backend makes no dma-buf of the guest's memory, so it is given no device for one.
+            Needs::of_render_node(slot, &project, &setup.driver_folder, node.device_file, None)
+        }
+    };
+    use guesthouse_backend_intel::stage::{DESKTOP_VARIABLE, Desktop};
+    let desktop = Desktop::from_environment();
+    if desktop == Desktop::Software {
+        log::info!(
+            "Windows composes the guest's desktop in software on this start; {DESKTOP_VARIABLE}=0 gives it \
+             the hardware desktop instead"
+        );
+    }
+    let run_folder = slot.run_folder(&project);
+    serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| {
+        let why = backend.set_desktop(desktop);
+        if let Err(error) = guesthouse_daemon::desktop_note::write_note(&run_folder, why.as_deref()) {
+            log::warn!("The note on the guest's desktop couldn't be written: {error}");
+        }
+    })
+}
+
+/// Serves with a backend whose card is reached through one render node, which with what else is in
+/// `needs` is all the jail lets this process open. A recorded card needs no device at all.
+/// `configure` sets the backend's own switches once it is open.
+#[cfg(any(feature = "amd", feature = "intel"))]
+fn serve_on_render_node<B: guesthouse_backend::Backend>(
+    slot: Slot,
+    project: PathBuf,
+    setup: &guesthouse_backend::Setup,
+    needs: guesthouse_daemon::jail::Needs,
+    configure: impl FnOnce(&mut B),
+) -> Result<(), Box<dyn std::error::Error>> {
+    use guesthouse_core::{Config, MemoryLimits, Session};
+    use guesthouse_daemon::environment::{guest_ram, video_cap, within_the_cards};
+    use guesthouse_daemon::guest_memory::SharedMemory;
+    use guesthouse_daemon::jail::{lock_calls, lock_files};
+    use guesthouse_daemon::router::Router;
+    use guesthouse_daemon::server::Server;
+    use guesthouse_daemon::startup::start_backend;
+
     let run_folder = slot.run_folder(&project);
     let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
     let memory = SharedMemory::from_environment(slot, guest_ram(ram.as_deref()))?;
-    let memory_device = PathBuf::from(guesthouse_backend_amd::Udmabuf::DEVICE);
-    let memory_device = memory_device.exists().then_some(memory_device);
-    let needs = Needs::of_amd_card(slot, &project, &setup.driver_folder, node, memory_device);
     needs.prepare()?;
     let locked = lock_files(&needs)?;
-    let mut backend: AmdBackend = start_backend(&setup)?;
-    if env::var_os(guesthouse_backend_amd::IB_DUMP_VARIABLE).is_some() {
-        backend.keep_command_buffers(&run_folder, guesthouse_daemon::logger::started());
-    }
-    let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
+    let mut backend: B = start_backend(setup)?;
+    configure(&mut backend);
+    let cap = within_the_cards(video_cap(cap.as_deref()), backend.video_memory_cap());
+    let limits = MemoryLimits::new(backend.facts(), cap, guest_ram(ram.as_deref()));
     let config = Config::new(limits);
     let mut session = Session::new(backend, memory, config);
     session.timings_mut().set_enabled(env::var_os("GUESTHOUSE_TIMING").is_some());
@@ -171,7 +260,7 @@ fn timeslice(name: &str, text: Option<&str>) -> Option<u64> {
     micros
 }
 
-#[cfg(all(feature = "stand-in", not(any(feature = "nvidia", feature = "amd"))))]
+#[cfg(all(feature = "stand-in", not(any(feature = "nvidia", feature = "amd", feature = "intel"))))]
 fn serve(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     use guesthouse_backend::Backend;
     use guesthouse_backend_standin::{SparseMemory, StandIn};

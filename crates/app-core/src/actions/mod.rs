@@ -4,15 +4,21 @@
 mod amd_files;
 mod amd_package;
 mod amd_start;
+mod api_stage;
 mod desktop;
+mod diagnose;
 mod display;
+mod driver_store;
 mod gpu_check;
 mod guest_files;
 mod guest_upload;
+mod hardware_desktop;
 mod identity;
 mod identity_restart;
 mod identity_switch;
 mod install;
+mod intel_device;
+mod intel_files;
 mod own_linux;
 mod ubuntu;
 mod window_speed;
@@ -21,20 +27,23 @@ use amd_files::{bring_amd_driver_up_to_date, complete_host_driver};
 use amd_package::register_amd_package;
 pub use desktop::{apply_share, boots, rebooted};
 use desktop::{note_boot, set_up_desktop, wait_for_desktop};
-use gpu_check::check_gpu;
-use guest_files::{place_driver_files, place_profile_store};
-use identity::{after_failed_gpu, set_up_identity};
+pub use diagnose::{API_FILE, GATHERED_FOLDER, PROBE_FILE, REPORT_FILE};
+use gpu_check::{Gpu, confirm_gpu};
+use guest_files::{place_driver_files, place_profile_store, place_system_files, write_device_key};
+use identity::set_up_identity;
 use identity_restart::restart_after_switch;
 use identity_switch::{new_vm_needed, stop_for_new_identity};
 pub use install::{
     INSTALL_STEPS, answer_disc_path, answer_file, install, install_step, make_answer_disc, wait_for_setup,
 };
+use intel_files::complete_intel_driver;
 use window_speed::apply_window_speed;
 
 use crate::context::Context;
 use crate::disk_image::disk_size_gib;
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::{PciIdentity, read_state};
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::is_no_room;
 use crate::host::{GIB, cpu_list, fits_now, ram_limit_for, vcache_cpus};
 use crate::kept_logs;
@@ -196,33 +205,90 @@ fn start_gpu_vm(task: &mut Task) -> Result<PciIdentity> {
 
 /// The guest has answered, so this takes it from there to a desktop someone can use.
 fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
-    get_gpu_ready(task)?;
+    intel_device::switch_back_on(task, shown)?;
+    let picture_first = hardware_desktop::picture_first(task);
+    // A guest left running without its GPU stays as it came up, for the reports it's kept for.
+    if get_gpu_ready_on_this_desktop(task, picture_first)? != Gpu::Working {
+        return Ok(());
+    }
     if new_vm_needed(shown, &read_state(task.context, &task.machine), &task.machine) {
         start_again_for_new_identity(task)?;
-        get_gpu_ready(task)?;
+        if get_gpu_ready_on_this_desktop(task, picture_first)? != Gpu::Working {
+            return Ok(());
+        }
     }
+    intel_device::switch_off_for_software_desktop(task, shown)?;
     set_up_desktop(task)?;
-    apply_window_speed(task)?;
-    if task.machine.windows_amd_card().is_some() {
-        // What follows places NVIDIA's files and settings store, which a guest on AMD has no use for.
-        bring_amd_driver_up_to_date(task)?;
-        return register_amd_package(task);
+    if let Some(why) = hardware_desktop::no_picture(task) {
+        return start_again_on_software_desktop(task, &why).map(|_| ());
     }
-    place_driver_files(task)?;
-    place_profile_store(task)
+    if picture_first && let Some(why) = hardware_desktop::failed_with_picture(task) {
+        return start_again_on_software_desktop(task, &why).map(|_| ());
+    }
+    apply_window_speed(task)?;
+    place_files_for_maker(task)
+}
+
+/// What the guest is given for its card, by the card's maker. Each maker's files and settings are for
+/// its own driver only.
+fn place_files_for_maker(task: &mut Task) -> Result<()> {
+    match task.machine.windows_maker() {
+        Some(GpuMaker::Nvidia) => {
+            place_driver_files(task)?;
+            place_profile_store(task)
+        }
+        Some(GpuMaker::Amd) => {
+            bring_amd_driver_up_to_date(task)?;
+            register_amd_package(task)
+        }
+        // Intel's support is new, so there is no earlier layout of its driver to bring up to date. The
+        // guest has the loaders from install, and this puts back any it lacks. Another maker's files
+        // would put a driver in the guest that isn't its card's.
+        Some(GpuMaker::Intel) => {
+            write_device_key(task)?;
+            place_system_files(task)
+        }
+        None => Ok(()),
+    }
 }
 
 /// Up to the point where it's known which identity the VM should show, before any work on a desktop
 /// that might be about to go.
-fn get_gpu_ready(task: &mut Task) -> Result<()> {
+fn get_gpu_ready(task: &mut Task) -> Result<Gpu> {
     task.step("Waiting for the desktop");
     if !wait_for_desktop(task) {
         return Err(Failure::new("Windows started, but its desktop never came up."));
     }
-    check_gpu(task).map_err(|failure| after_failed_gpu(task, failure))?;
-    restart_after_switch(task)?;
+    // Before the check, as a guest missing a file of Intel's driver has no GPU until it has the file.
+    complete_intel_driver(task)?;
+    if confirm_gpu(task)? == Gpu::Missing || restart_after_switch(task)? == Gpu::Missing {
+        return Ok(Gpu::Missing);
+    }
     set_up_identity(task);
-    Ok(())
+    Ok(Gpu::Working)
+}
+
+/// [`get_gpu_ready`], and for a desktop on an Intel card, a watch until it has stayed up, unless
+/// this start shows its picture first and is watched after. One that
+/// failed is started again on the software desktop, and what that start found is then the answer.
+fn get_gpu_ready_on_this_desktop(task: &mut Task, picture_first: bool) -> Result<Gpu> {
+    let gpu = get_gpu_ready(task)?;
+    let Some(why) = hardware_desktop::failed(task, gpu == Gpu::Missing, picture_first) else {
+        return Ok(gpu);
+    };
+    start_again_on_software_desktop(task, &why)
+}
+
+/// A desktop on an Intel card that failed, for `why`: the machine goes to the software desktop and
+/// is started again on it, and what that start found is then the answer.
+fn start_again_on_software_desktop(task: &mut Task, why: &str) -> Result<Gpu> {
+    let told = hardware_desktop::fall_back_and_stop(task, why)?;
+    wait_for_memory(task);
+    task.error.clear();
+    let shown = start_gpu_vm(task)?;
+    get_ready(task, shown)?;
+    task.error = if task.error.is_empty() { told } else { format!("{told} {}", task.error) };
+    Ok(Gpu::StartedAgain)
 }
 
 /// The same start goes on in a new VM, which shows the card maker's number. What the first one said is about a
@@ -357,6 +423,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         "force" => force(task, first),
         "grow" => grow(task, text.parse().map_err(|_| Failure::new("That is not a size."))?),
         "resume" => resume(task),
+        "dxdiag" | "api-check" => diagnose::dxdiag(task),
         "clean_up" => clean_up(task),
         "after_reboot" => after_reboot(task),
         "apply_display" => {
@@ -394,20 +461,21 @@ pub fn run_task(
     machine_id: &str,
     arguments: &[String],
 ) -> Result<()> {
-    let machine = match load(context, machine_id) {
-        Ok(machine) => machine,
-        Err(error) => {
-            let record = TaskRecord {
-                action: action.to_owned(),
-                machine: machine_id.to_owned(),
-                pid: 0,
-                step: String::new(),
-                error: error.0.clone(),
-            };
-            let _ = write_task(context, None, &record);
-            return Err(error);
-        }
-    };
+    let machine =
+        match crate::machine::id_from_argument(context, machine_id).and_then(|id| load(context, &id)) {
+            Ok(machine) => machine,
+            Err(error) => {
+                let record = TaskRecord {
+                    action: action.to_owned(),
+                    machine: machine_id.to_owned(),
+                    pid: 0,
+                    step: String::new(),
+                    error: error.0.clone(),
+                };
+                let _ = write_task(context, None, &record);
+                return Err(error);
+            }
+        };
     let mut task = Task::new(context, host, action, machine);
     let lock = if action == "force" { Ok(None) } else { take_lock(context).map(Some) };
     let result = lock.and_then(|_lock| run_action(&mut task, arguments));

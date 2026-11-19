@@ -5,7 +5,7 @@ use super::{Failure, Handled, Session, answer_status};
 use crate::deferred::DeferredAction;
 use crate::pending::GateStep;
 use crate::tables::{Queue, ReservedRange};
-use guesthouse_backend::{Backend, GuestMemory, SpaceId, UnmapRequest, WorkSource};
+use guesthouse_backend::{Backend, CommandBuffer, GuestMemory, SpaceId, UnmapRequest, WorkSource};
 use guesthouse_messages::queue::{
     CreateContext, CreateHardwareQueue, DEFAULT_QUEUED_PRESENT_LIMIT, QueuedLimit, SubmitToContext,
     SubmitToQueue,
@@ -18,6 +18,24 @@ use guesthouse_messages::{MessageHeader, Status};
 const PROCESS_ID: usize = 0x20;
 const PROCESS_FLAGS: usize = 0x232;
 const PROCESS_32_BIT: u8 = 4;
+/// Between the PID and the flags, the process's name as UTF-16 ending in a zero, when the guest
+/// gives one: the 261 units of MAX_PATH and its zero.
+const PROCESS_NAME: std::ops::Range<usize> = 0x28..PROCESS_FLAGS;
+
+/// The program a new process runs, by its file name alone: the folders before it can name the
+/// guest's user, and the log has no use for them. Empty when the guest sent no name.
+fn program_name(message: &[u8]) -> String {
+    let field = message.get(PROCESS_NAME).unwrap_or_default();
+    let units: Vec<u16> = field
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .take_while(|unit| *unit != 0)
+        .collect();
+    let path = String::from_utf16_lossy(&units);
+    path.rsplit(['\\', '/']).next().unwrap_or_default().to_owned()
+}
 
 impl<B: Backend, M: GuestMemory> Session<B, M> {
     pub(super) fn create_process(&mut self, message: &[u8], out: &mut Vec<u8>) -> Handled {
@@ -25,7 +43,18 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if u8_at(message, PROCESS_FLAGS)? & PROCESS_32_BIT != 0 {
             self.processes_32_bit.insert(handle);
         }
-        self.guest_pids.insert(handle, u32_at(message, PROCESS_ID)?);
+        let pid = u32_at(message, PROCESS_ID)?;
+        self.guest_pids.insert(handle, pid);
+        // So a later line about this process can be tied to a program in the guest.
+        match program_name(message) {
+            name if name.is_empty() => {
+                log::debug!("process {handle:#x} is guest pid {pid}, which gave no name")
+            }
+            name => {
+                log::debug!("process {handle:#x} is guest pid {pid}, {name}");
+                self.programs.insert(handle, name);
+            }
+        }
         put_u32(out, handle);
         Ok(())
     }
@@ -35,6 +64,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let process = MessageHeader::process_of(message)?;
         self.processes_32_bit.remove(&process);
         self.guest_pids.remove(&process);
+        self.programs.remove(&process);
         self.process_going(process);
         self.context_processes.retain(|_, owner| *owner != process);
         self.reservations.retain(|&(owner, _), _| owner != process);
@@ -228,8 +258,16 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.run_deferred();
         let request = SubmitToQueue::parse(message)?;
         let value = request.fence_value;
+        self.note_batch(request.queue, request.commands, request.commands_length);
         self.note_waiting_updates(request.queue);
-        match self.start_on_gpu(request.queue, WorkSource::HardwareQueue, request.private, value) {
+        let commands = CommandBuffer { address: request.commands, length: request.commands_length };
+        match self.start_on_gpu(
+            request.queue,
+            WorkSource::HardwareQueue,
+            request.private,
+            Some(commands),
+            value,
+        ) {
             GpuTook::Work(work) => self.hold_if_ring_is_full(request.queue, value, work),
             GpuTook::NoRoom => {
                 self.retry_later(message);
@@ -266,13 +304,24 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let record = self.queues.get(&queue).ok_or(Malformed)?;
         let (fence, value) = (record.fence, record.last_fence.unwrap_or(0).saturating_add(1));
         self.note_waiting_updates(queue);
-        match self.start_on_gpu(queue, WorkSource::Context, request.private, value) {
+        // Only a backend that runs them is given the commands. For it, each submission has a value
+        // of its own, as one finished unrun may come before one that runs.
+        let runs_commands = self.backend.runs_context_commands();
+        let commands = (runs_commands && request.commands_length != 0)
+            .then_some(CommandBuffer { address: request.commands, length: request.commands_length });
+        if let Some(commands) = commands {
+            self.note_batch(queue, commands.address, commands.length);
+        }
+        match self.start_on_gpu(queue, WorkSource::Context, request.private, commands, value) {
             GpuTook::Work(_) => {}
             GpuTook::NoRoom => {
                 self.retry_later(message);
                 return Ok(());
             }
             took @ (GpuTook::Nothing | GpuTook::Dropped) => {
+                if runs_commands && let Some(record) = self.queues.get_mut(&queue) {
+                    record.last_fence = Some(value);
+                }
                 self.memory.write_u64(fence, value)?;
                 answer_status(took.status(), out);
                 return Ok(());
@@ -280,5 +329,25 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
         answer_status(Status::SUCCESS, out);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_process(name: &str) -> Vec<u8> {
+        let mut message = vec![0; PROCESS_FLAGS + 1];
+        let units: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        message[PROCESS_NAME.start..PROCESS_NAME.start + units.len()].copy_from_slice(&units);
+        message
+    }
+
+    #[test]
+    fn a_process_is_named_by_its_programs_file_name_alone() {
+        assert_eq!(program_name(&create_process("C:\\Users\\ana\\Games\\game.exe")), "game.exe");
+        assert_eq!(program_name(&create_process("dwm.exe")), "dwm.exe");
+        assert_eq!(program_name(&create_process("")), "");
+        assert_eq!(program_name(&[0; 0x30]), "", "a message too short for the name has none");
     }
 }

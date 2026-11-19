@@ -202,6 +202,14 @@ mod dispatch {
     }
 
     #[test]
+    fn a_refused_command_is_shown_whole_in_hex_and_a_long_one_is_cut() {
+        assert_eq!(Refused(&[0x00, 0xbb, 0x0f]).to_string(), "00bb0f");
+        let long = Refused(&[0xaa; 1025]).to_string();
+        assert_eq!(long.len(), 2 * 1024 + 3);
+        assert!(long.ends_with("aa..."));
+    }
+
+    #[test]
     fn something_too_short_to_read_is_not_supported() {
         assert_eq!(status_of(&send(&mut session(), &[0; 8])), Status::NOT_SUPPORTED.0);
     }
@@ -912,6 +920,88 @@ mod allocations {
     }
 
     #[test]
+    fn a_hardware_queue_submissions_commands_reach_the_backend_and_a_contexts_names_none() {
+        let mut session = session();
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        let mut request = message(Command::SubmitToHardwareQueue, 0x50);
+        set_u32(&mut request, 0x18, queue);
+        set_u64(&mut request, 0x20, 1);
+        set_u64(&mut request, 0x28, 0x255_F13C_0000);
+        set_u32(&mut request, 0x30, 0x1040);
+        assert_eq!(send(&mut session, &request), SUCCESS.to_le_bytes());
+        let named = guesthouse_backend::CommandBuffer { address: 0x255_F13C_0000, length: 0x1040 };
+        assert_eq!(session.backend().last_commands, Some(named));
+        let mut request = message(Command::SubmitToContext, 0x198);
+        set_u32(&mut request, 0x34, context);
+        send(&mut session, &request);
+        assert_eq!(session.backend().last_commands, None);
+    }
+
+    fn submit_to_context(session: &mut TestSession, context: u32, commands: u64, length: u32) {
+        let mut request = message(Command::SubmitToContext, 0x198);
+        set_u64(&mut request, 0x18, commands);
+        set_u32(&mut request, 0x20, length);
+        set_u32(&mut request, 0x34, context);
+        assert_eq!(send(session, &request), SUCCESS.to_le_bytes());
+    }
+
+    #[test]
+    fn a_backend_that_runs_a_contexts_commands_is_given_them_and_each_submission_counts_up() {
+        let mut session = session();
+        session.backend_mut().context_commands = true;
+        let context = create_context(&mut session, 0);
+        submit_to_context(&mut session, context, 0x6_0001_0040, 0x400);
+        let named = guesthouse_backend::CommandBuffer { address: 0x6_0001_0040, length: 0x400 };
+        assert_eq!(session.backend().last_commands, Some(named));
+        submit_to_context(&mut session, context, 0x6_0001_0040, 0);
+        assert_eq!(session.backend().last_commands, None, "a length of zero names none");
+        // The stand-in finishes each unrun, and the context's queue fence still counts up, so work
+        // that does start after it has a value nothing has written yet.
+        let queue = session.context_queues[&context][0];
+        let fence = session.queues[&queue].fence;
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 2);
+        session.backend_mut().run_work = true;
+        submit_to_context(&mut session, context, 0x6_0001_0040, 0x400);
+        assert_eq!(session.queues[&queue].last_fence, Some(3));
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 2, "running, so not written yet");
+    }
+
+    #[test]
+    fn a_backend_that_doesnt_keeps_its_context_queue_fence_at_one() {
+        let mut session = session();
+        let context = create_context(&mut session, 0);
+        submit_to_context(&mut session, context, 0x6_0001_0040, 0x400);
+        submit_to_context(&mut session, context, 0x6_0001_0040, 0x400);
+        let queue = session.context_queues[&context][0];
+        assert_eq!(session.queues[&queue].last_fence, None);
+        assert_eq!(session.memory().read_u64(session.queues[&queue].fence).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_monitored_fence_is_found_by_its_gpu_address_for_the_process_that_holds_it() {
+        let mut session = session();
+        let (_, gpu_address, fence) = create_fence(&mut session, 0);
+        session.backend_mut().ask_monitored = Some(gpu_address);
+        let context = create_context(&mut session, 0);
+        submit_to_context(&mut session, context, 0, 0);
+        assert_eq!(session.backend().monitored_found, Some(Some(fence)));
+        session.backend_mut().ask_monitored = Some(gpu_address + 8);
+        submit_to_context(&mut session, context, 0, 0);
+        assert_eq!(session.backend().monitored_found, Some(None), "no fence there");
+        // Another process's work may not name it.
+        session.backend_mut().ask_monitored = Some(gpu_address);
+        let mut request = message(Command::CreateContext, 0x34);
+        set_u32(&mut request, 8, PROCESS + 0x1000);
+        let other = u32_at(&send(&mut session, &request), 0x18).unwrap();
+        let mut request = message(Command::SubmitToContext, 0x198);
+        set_u32(&mut request, 8, PROCESS + 0x1000);
+        set_u32(&mut request, 0x34, other);
+        send(&mut session, &request);
+        assert_eq!(session.backend().monitored_found, Some(None));
+    }
+
+    #[test]
     fn a_first_lock_waits_for_the_gpu_to_finish_in_its_space() {
         let mut session = session();
         session.backend_mut().run_work = true;
@@ -969,6 +1059,66 @@ mod allocations {
         map(&mut session, written, 0, 0, 0);
         submit(&mut session, queue, 1);
         assert_eq!(lock(&mut session, written).0, Status::SUCCESS.0);
+        assert_eq!(session.backend().preserved.len(), 1);
+    }
+
+    /// A session whose work runs to the end at once, on a card whose new memory is zero.
+    fn on_zeroing_card() -> (TestSession, u32) {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().run_work_at_once = true;
+        session.backend_mut().new_memory_is_zero = true;
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        (session, queue)
+    }
+
+    #[test]
+    fn memory_nothing_wrote_since_it_was_mapped_moves_without_a_copy() {
+        let (mut session, queue) = on_zeroing_card();
+        submit(&mut session, queue, 1);
+        let (_, fresh) = allocate(&mut session, private(0x1000));
+        map(&mut session, fresh, 0, 0, 0);
+        let (status, address) = lock(&mut session, fresh);
+        assert_eq!(status, Status::SUCCESS.0);
+        assert!(session.backend().preserved.is_empty(), "the work ran before it was mapped");
+        let mut pages = [0xFFu8; 0x1000];
+        session.memory_mut().read_bytes(address, &mut pages);
+        assert_eq!(pages, [0u8; 0x1000], "and the guest reads what new video memory holds");
+    }
+
+    #[test]
+    fn memory_mapped_while_work_ran_is_copied_however_it_was_mapped_since() {
+        let (mut session, queue) = on_zeroing_card();
+        let (_, written) = allocate(&mut session, private(0x1000));
+        map(&mut session, written, 0, 0, 0);
+        submit(&mut session, queue, 1);
+        // A second mapping, made after the work, doesn't make the first one's time forgotten.
+        map(&mut session, written, 0, 0, 0);
+        assert_eq!(lock(&mut session, written).0, Status::SUCCESS.0);
+        assert_eq!(session.backend().preserved.len(), 1, "the work may have written it");
+    }
+
+    #[test]
+    fn memory_in_a_space_with_work_that_never_ends_is_always_copied() {
+        let (mut session, queue) = on_zeroing_card();
+        session.backend_mut().run_work_at_once = false;
+        session.backend_mut().work_stays = true;
+        submit(&mut session, queue, 1);
+        let (_, fresh) = allocate(&mut session, private(0x1000));
+        map(&mut session, fresh, 0, 0, 0);
+        assert_eq!(lock(&mut session, fresh).0, Status::SUCCESS.0);
+        assert_eq!(session.backend().preserved.len(), 1, "the ring writes without a word here");
+    }
+
+    #[test]
+    fn a_card_whose_new_memory_is_not_known_to_be_zero_is_always_copied() {
+        let (mut session, queue) = on_zeroing_card();
+        session.backend_mut().new_memory_is_zero = false;
+        submit(&mut session, queue, 1);
+        let (_, fresh) = allocate(&mut session, private(0x1000));
+        map(&mut session, fresh, 0, 0, 0);
+        assert_eq!(lock(&mut session, fresh).0, Status::SUCCESS.0);
         assert_eq!(session.backend().preserved.len(), 1);
     }
 }
@@ -1346,6 +1496,20 @@ mod mappings {
             session.allocations[&handle].mappings.iter().map(|m| (m.address, m.first)).collect();
         pieces.sort();
         assert_eq!(pieces, [(0x5000_0000, 0), (0x5000_2000, 0x2000)]);
+    }
+
+    #[test]
+    fn a_range_comes_back_once_an_update_unmaps_the_guest_s_own_page_in_it() {
+        use super::address_reuse::{map_buffer, padded_buffer};
+        let mut session = session();
+        let (base, buffer, _) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        let (elsewhere, status) = map_buffer(&mut session, PROCESS);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(elsewhere, base);
+        let (sync, _, _) = create_fence(&mut session, 0);
+        update(&mut session, sync, 0, &[operation(1, base + 0x87_0000, 0x1_0000, 0, 0)]);
+        assert_eq!(map_buffer(&mut session, PROCESS), (base, SUCCESS));
     }
 
     #[test]
@@ -2677,6 +2841,72 @@ mod address_reuse {
         assert_eq!(reserve(&mut session, 0x10000), reserved);
         let (_, handle) = allocate(&mut session, private(0x1000));
         assert_eq!(map(&mut session, handle, 0, 0, 0).0, mapped);
+    }
+
+    /// Intel's driver asks to map a page more than a buffer holds, then maps a page of its own over
+    /// that last page. Returns where the buffer went, its resource, and the page's resource.
+    pub(super) fn padded_buffer(session: &mut TestSession) -> (u64, u32, u32) {
+        let (buffer_resource, buffer) = allocate(session, private(0x87_0000));
+        let (base, status) = map(session, buffer, 0, 0, 0x880);
+        assert_eq!(status, SUCCESS);
+        let (pad_resource, pad) = allocate(session, private(0x1_0000));
+        assert_eq!(map(session, pad, base + 0x87_0000, 0, 0x10), (base + 0x87_0000, SUCCESS));
+        (base, buffer_resource, pad_resource)
+    }
+
+    /// A buffer as [`padded_buffer`] makes, mapped where the host chooses.
+    pub(super) fn map_buffer(session: &mut TestSession, process: u32) -> (u64, u32) {
+        let mut request = create_message(0, &[private(0x87_0000)]);
+        set_u32(&mut request, 8, process);
+        let reply = send(session, &request);
+        assert_eq!(status_of(&reply), SUCCESS);
+        let mut request = message(Command::MapGpuAddresses, 0x50);
+        set_u32(&mut request, 8, process);
+        set_u32(&mut request, 0x38, u32_at(&reply, 0x10).unwrap());
+        set_u64(&mut request, 0x48, 0x880);
+        let reply = send(session, &request);
+        (u64_at(&reply, 0).unwrap(), u32_at(&reply, 16).unwrap())
+    }
+
+    #[test]
+    fn a_freed_reservation_is_reserved_again_with_the_guest_s_pages_still_in_it() {
+        let mut session = session();
+        let range = reserve(&mut session, 0x2_0000);
+        let (_, page) = allocate(&mut session, private(0x1_0000));
+        assert_eq!(map(&mut session, page, range + 0x1_0000, 0, 0x10), (range + 0x1_0000, SUCCESS));
+        free(&mut session, range);
+        // The guest's next map there clears what it left, as it does in any range it holds.
+        assert_eq!(reserve(&mut session, 0x2_0000), range);
+    }
+
+    #[test]
+    fn a_range_with_the_guest_s_own_page_in_it_is_not_handed_out_again() {
+        let mut session = session();
+        let (base, buffer, _) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        let (address, status) = map_buffer(&mut session, PROCESS);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(address, base, "the guest's page is still at {:#x}", base + 0x87_0000);
+    }
+
+    #[test]
+    fn a_range_comes_back_once_the_guest_s_own_page_in_it_goes() {
+        let mut session = session();
+        let (base, buffer, pad) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        assert_eq!(map_buffer(&mut session, PROCESS).1, SUCCESS);
+        destroy(&mut session, pad, &[]);
+        assert_eq!(map_buffer(&mut session, PROCESS), (base, SUCCESS));
+    }
+
+    #[test]
+    fn the_guest_s_own_page_in_a_range_keeps_it_from_other_processes_too() {
+        let mut session = session();
+        let (base, buffer, _) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        let (address, status) = map_buffer(&mut session, PROCESS + 0x1000);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(address, base, "an address handed out has to work in every space");
     }
 }
 

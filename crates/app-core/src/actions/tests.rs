@@ -1,9 +1,11 @@
 use super::desktop::{BOOTS_FILE, SERIAL_FILE};
+use super::gpu_check::gpu_found;
 use super::guest_files::{place_driver_files, place_profile_store};
 use super::window_speed::apply_window_speed;
 use super::*;
 use crate::agent::stand_in::ScriptedAgent;
 use crate::clock::Clock;
+use crate::gpu_identity::{IdentityState, Shown, read_state, write_state};
 use crate::machine::Kind;
 use crate::processes::stand_in::fake_process;
 use crate::slots;
@@ -240,6 +242,56 @@ fn a_guest_with_no_gpu_fails_the_start_says_so_and_turns_off() {
     assert_eq!(host.said(), ["start gpu", "stop 30"]);
 }
 
+/// The software desktop for this build, as after a fallback: the hardware desktop is the default.
+fn on_the_software_desktop(context: &Context, vm: &Machine) {
+    fs::create_dir_all(vm.folder(context)).unwrap();
+    crate::intel_desktop::fall_back(context, vm, "a test of the software desktop").unwrap();
+}
+
+#[test]
+fn an_intel_guest_with_no_gpu_is_left_running_and_says_why() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let mut vm = guest_saying(&mut context, "gpu working 0\n");
+    vm.use_windows_card(GpuMaker::Intel, "0000:03:00.0");
+    on_the_software_desktop(&context, &vm);
+    fs::write(context.run_folder(None).join(crate::daemon::OUTPUT_FILE), "ERROR no xe engine\n").unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", vm);
+    assert_eq!(boot(&mut task), Ok(()));
+    assert_eq!(host.said(), ["start gpu"], "nothing turned it off");
+    for said in [&task.error, &fs::read_to_string(context.paths.log_file()).unwrap()] {
+        assert!(said.contains("without its GPU") && said.contains("left running"), "{said}");
+        assert!(said.contains("no xe engine"), "{said}");
+    }
+}
+
+#[test]
+fn an_intel_guest_shown_intels_number_keeps_it_after_a_failed_check() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let mut vm = guest_saying(&mut context, "gpu working 0\n");
+    vm.use_windows_card(GpuMaker::Intel, "0000:03:00.0");
+    on_the_software_desktop(&context, &vm);
+    let package_vendor = crate::gpu_identity::INTEL_RENDER.vendor;
+    let state = IdentityState { shown: Shown::Maker, package_vendor, ..IdentityState::default() };
+    write_state(&context, &vm, &state).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", vm.clone());
+    assert_eq!(boot(&mut task), Ok(()));
+    assert!(task.error.contains("keeps Intel's vendor ID"), "{}", task.error);
+    assert_eq!(read_state(&context, &vm).shown, Shown::Maker);
+    assert_eq!(host.said(), ["start gpu"]);
+}
+
+#[test]
+fn only_intel_runs_without_its_gpu() {
+    use super::gpu_check::runs_without_gpu;
+    assert!(runs_without_gpu(Some(GpuMaker::Intel)));
+    assert!(!runs_without_gpu(Some(GpuMaker::Nvidia)) && !runs_without_gpu(Some(GpuMaker::Amd)));
+    assert!(!runs_without_gpu(None));
+}
+
 /// What a start says when the daemon's output file holds `log` and the guest has no GPU.
 fn failure_with_daemon_saying(log: &str) -> String {
     let scratch = Scratch::new();
@@ -286,7 +338,7 @@ fn a_gpu_that_is_a_moment_late_is_waited_for() {
     context.agent = Arc::new(ScriptedAgent::answering(&["gpu working 0\n", "", "gpu working 1\n"]));
     let host = RecordingHost::default();
     let task = Task::new(&context, &host, "start", vm);
-    assert_eq!(check_gpu(&task), Ok(()));
+    assert!(gpu_found(&task));
 }
 
 #[test]
@@ -600,4 +652,66 @@ fn a_run_that_ends_is_kept_where_a_reboot_leaves_it() {
     run_task(&context, &host, "clean_up", &vm.id, &[]).unwrap();
     let kept = crate::kept_logs::kept_folder(&context, &vm.id).join("daemon.out");
     assert_eq!(fs::read_to_string(kept).unwrap(), "the daemon's last words");
+}
+
+#[test]
+fn an_intel_machine_is_given_neither_nvidias_files_nor_amds_only_its_device_key() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let agent = Arc::new(ScriptedAgent::answering(&["device key set\r\n"]));
+    context.agent = agent.clone();
+    let mut intel = machine(&context);
+    intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    crate::agent::make_token(&context, &intel).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", intel);
+    place_files_for_maker(&mut task).unwrap();
+    let asked = agent.requests.lock().unwrap();
+    assert_eq!(asked.len(), 1, "the device key alone");
+    assert!(asked[0].2.contains("OpenCLDriverName"), "{}", asked[0].2);
+    assert_eq!(task.error, "");
+}
+
+#[test]
+fn an_intel_machine_is_given_the_loaders_from_the_drivers_list_out_of_intels_store_folder() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    crate::setup::intel::stand_in::lay_out_driver(&scratch, "intel-driver");
+    let folder = scratch.path("intel-driver");
+    scratch.write("intel-driver/system-files.txt", "System32\tvulkan-1-64.dll\tvulkan-1.dll\n");
+    crate::setup::intel::write_intel_setup(&context, &folder, "32.0.101.9175").unwrap();
+    scratch.write("program/guest/nv-files.ps1", "copies files");
+    let agent = Arc::new(ScriptedAgent::answering(&[
+        "device key set\r\n",
+        "",
+        "missing 1\r\n",
+        "",
+        "copied vulkan-1.dll\r\n",
+    ]));
+    context.agent = agent.clone();
+    let mut intel = machine(&context);
+    intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    crate::agent::make_token(&context, &intel).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", intel);
+    place_files_for_maker(&mut task).unwrap();
+    assert_eq!(task.error, "");
+    let asked = agent.requests.lock().unwrap();
+    assert_eq!(asked.len(), 5, "the device key, the list, the count, the script and the run");
+    assert!(asked[4].2.contains("-StoreFolder iigd_dch.inf_amd64_gpupv"), "{}", asked[4].2);
+}
+
+#[test]
+fn an_intel_device_key_that_does_not_take_is_said_and_the_start_goes_on() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let agent = Arc::new(ScriptedAgent::answering(&["Access is denied\r\n"]));
+    context.agent = agent.clone();
+    let mut intel = machine(&context);
+    intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    crate::agent::make_token(&context, &intel).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", intel);
+    place_files_for_maker(&mut task).unwrap();
+    assert!(task.error.contains("registry key"), "{}", task.error);
 }

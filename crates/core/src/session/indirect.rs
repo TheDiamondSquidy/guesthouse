@@ -27,6 +27,22 @@ const SLOT_SLACK: u64 = 2 << 20;
 /// How many allocations of about the right size are worth reading. Each costs a short copy.
 const MOST_CANDIDATES: usize = 32;
 
+/// What each buffer read for a stamp began with, for a ring that couldn't be made. Which slots
+/// were stamped, and with what, says where the stamps went.
+fn what_was_read(read: &[(u32, [u8; STAMP_SIZE])]) -> String {
+    if read.is_empty() {
+        return "no buffer of the right size to read".to_string();
+    }
+    let each: Vec<String> = read
+        .iter()
+        .map(|(allocation, bytes)| {
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{allocation:#x} starts {hex}")
+        })
+        .collect();
+    format!("read {}", each.join(", "))
+}
+
 impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn reply(&self, outcome: Outcome, next_slot: Option<u32>) -> Reply {
         let viewer = self.frames.viewer_facts;
@@ -117,12 +133,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// it has opened are here too, which is why a size alone can't say what's a slot.
     fn slot_candidates(&self, ring: &Register, space: SpaceId) -> Vec<GuestSlot> {
         let fits = |size: u64| size >= ring.slot_size && size - ring.slot_size <= SLOT_SLACK;
+        let in_guest_pages = self.backend.slots_may_be_guest_pages();
         let mut found: Vec<GuestSlot> = self
             .allocations
             .iter()
             .filter(|(_, allocation)| {
                 fits(allocation.size)
-                    && allocation.guest_address.is_none()
+                    && (in_guest_pages || allocation.guest_address.is_none())
                     && allocation.view.is_none()
                     && allocation.mappings.iter().any(|mapping| mapping.space == space)
             })
@@ -140,10 +157,25 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn find_slots(&mut self, ring: &Register, space: SpaceId) -> Result<Vec<GuestSlot>, BackendError> {
         let own_space = self.own_space()?;
         let mut slots = vec![None; ring.slots as usize];
+        let mut read = Vec::new();
         for candidate in self.slot_candidates(ring, space) {
             let mut bytes = [0; STAMP_SIZE];
-            let host = &mut services!(self);
-            self.backend.read_memory_start(host, own_space, candidate.memory, &mut bytes)?;
+            // A candidate the guest's CPU has locked lies in the guest's own pages, and its stamp is
+            // read where it is. Only a backend that says its slots may be there has such candidates.
+            let in_guest_pages =
+                self.allocations.get(&candidate.allocation).and_then(|found| found.guest_address);
+            match in_guest_pages {
+                Some(address) => {
+                    if self.memory.read_bytes(address, &mut bytes) != bytes.len() {
+                        continue;
+                    }
+                }
+                None => {
+                    let host = &mut services!(self);
+                    self.backend.read_memory_start(host, own_space, candidate.memory, &mut bytes)?;
+                }
+            }
+            read.push((candidate.allocation, bytes));
             let Some(stamp) = Stamp::parse(&bytes) else { continue };
             if stamp.generation == ring.name.generation
                 && let Some(place) = slots.get_mut(stamp.slot as usize)
@@ -152,7 +184,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             }
         }
         let found: Option<Vec<GuestSlot>> = slots.into_iter().collect();
-        found.ok_or(BackendError::new("the ring's stamps aren't all there"))
+        found.ok_or_else(|| {
+            BackendError::new(format!("the ring's stamps aren't all there; {}", what_was_read(&read)))
+        })
     }
 
     /// The stamps have reached memory, or never will.
@@ -409,7 +443,15 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if !wanted {
             return;
         }
-        if self.frames.viewer_facts.wants_memory {
+        // Slots in the guest's own pages aren't the card's to hand out, so their frames are copied
+        // into slots made for the viewer: on the card, or in memory here if it asked for that.
+        let in_guest_pages = self.frames.indirect.as_ref().is_some_and(|ring| {
+            let locked = |slot: &GuestSlot| {
+                self.allocations.get(&slot.allocation).is_some_and(|found| found.guest_address.is_some())
+            };
+            ring.slots.iter().any(locked)
+        });
+        if self.frames.viewer_facts.wants_memory || in_guest_pages {
             self.make_viewer_slots(None);
             return;
         }
@@ -443,7 +485,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     /// Slots of the viewer's own, one for each of the guest's, which each frame is copied into as it
     /// lands. They're in memory here for a viewer whose screen is on another GPU, which can't take the
-    /// card's buffers, or on the card in `tiling`. A frame that's already waiting is copied now, as a
+    /// card's buffers, or on the card: in `tiling`, or in rows when the guest's own slots lie in its
+    /// pages and so can't be handed out. A frame that's already waiting is copied now, as a
     /// still desktop sends no more.
     ///
     /// Says whether the viewer has them. Slots in memory that can't be made leave it with nothing,
@@ -459,7 +502,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         for size in sizes {
             let made = match tiling {
                 Some(tiling) => self.make_tiled_slot(picture, tiling, space),
-                None => self.make_host_slot(size, space),
+                // In memory here for a viewer that asked for that, and on the card for one that
+                // takes the card's buffers.
+                None => self.make_slot(size, space),
             };
             match made {
                 Ok((slot, buffer)) => {
@@ -562,5 +607,23 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             StagingStart::Running => self.wait_for_copy(),
             StagingStart::Finished(status) => status,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ring_that_cant_be_made_says_what_each_buffer_began_with() {
+        let mut stamped = [0; STAMP_SIZE];
+        stamped[..4].copy_from_slice(b"GHOU");
+        let said = what_was_read(&[(0x4007_da40, stamped), (0x4007_dac0, [0; STAMP_SIZE])]);
+        assert_eq!(
+            said,
+            "read 0x4007da40 starts 47484f55000000000000000000000000, \
+             0x4007dac0 starts 00000000000000000000000000000000"
+        );
+        assert_eq!(what_was_read(&[]), "no buffer of the right size to read");
     }
 }

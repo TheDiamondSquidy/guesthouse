@@ -2,7 +2,7 @@
 
 use super::{Handled, Session, answer_status};
 use crate::deferred::{DeferredAction, FreedAllocation};
-use crate::gpu_addresses::{ADDRESSES_END, ALLOCATION_ALIGN, AddressUse, GpuAddresses, LARGE_ALIGN, Window};
+use crate::gpu_addresses::{ADDRESSES_END, ALLOCATION_ALIGN, AddressUse, LARGE_ALIGN, Window};
 use crate::pending::Pending;
 use crate::tables::Mapping;
 use guesthouse_backend::{Backend, BackendError, GuestMemory, MapRequest, MemoryId, SpaceId, UnmapRequest};
@@ -171,6 +171,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             allocation.first_mapped = Some(self.mapped_so_far);
             self.mapped_so_far += 1;
         }
+        if !allocation.mapped_at.iter().any(|&(space, _)| space == mapping.space) {
+            let writes = self.space_writes.get(&mapping.space).copied().unwrap_or(0);
+            allocation.mapped_at.push((mapping.space, writes));
+        }
         allocation.mappings.push(mapping);
     }
 
@@ -182,9 +186,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
-    /// Addresses for a mapping the host places, inside the guest's window. New addresses are
-    /// handed out in order, so a window below the next new one is searched in this space alone,
-    /// and what is found there is placed, so nothing is handed out over it.
+    /// Addresses for a mapping the host places, inside the guest's window, clear of anything mapped
+    /// in any space. New addresses are handed out in order, so a window below the next new one is
+    /// searched in this space alone, and what is found there is placed, so nothing is handed out
+    /// over it.
     fn choose_address(
         &mut self,
         size: u64,
@@ -193,7 +198,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         window: Window,
         space: SpaceId,
     ) -> Option<u64> {
-        if let Some(base) = self.gpu_addresses.take_within(size, align, usage, window) {
+        let mapped = self.mapped_anywhere();
+        if let Some(base) = self.gpu_addresses.take_clear_of(size, align, usage, window, &mapped) {
             return Some(base);
         }
         let taken = self.taken_in(space);
@@ -222,7 +228,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         space: SpaceId,
         handle: u32,
     ) -> Result<(), BackendError> {
-        if !GpuAddresses::in_a_range(address) {
+        if !self.gpu_addresses.guest_may_map(address, length) {
             return Err(BackendError::new("no GPU address range holds this"));
         }
         let gpu_cached = self.allocations[&handle].gpu_cached;

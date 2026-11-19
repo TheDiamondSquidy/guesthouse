@@ -51,6 +51,8 @@ pub struct Needs {
     pub devices: Vec<PathBuf>,
     /// The guest's driver, from setup.
     pub driver_folder: Option<PathBuf>,
+    /// Files it only reads, as a recorded card a lab run stands in for a card with.
+    pub read_files: Vec<PathBuf>,
 }
 
 impl Needs {
@@ -67,6 +69,9 @@ impl Needs {
         }
         if let Some(folder) = &self.driver_folder {
             plan.grant(Grant::Read, folder);
+        }
+        for file in &self.read_files {
+            plan.grant(Grant::Read, file);
         }
         plan.grant(Grant::Own, &self.run_folder);
         plan
@@ -92,13 +97,14 @@ pub fn gpu_devices(devices: &Path, render_nodes: &Path) -> Vec<PathBuf> {
     found
 }
 
-#[cfg(feature = "amd")]
+#[cfg(any(feature = "amd", feature = "intel"))]
 impl Needs {
-    /// What the AMD daemon of this slot needs. Only the one render node is granted, so the other
-    /// cards' device files are not reachable from this process. `memory_device` is the device that
-    /// makes a dma-buf of the guest's memory, on a PC that has it: a rule can't name a file that
-    /// isn't there, and the backend does without it.
-    pub fn of_amd_card(
+    /// What the daemon of this slot needs for a card it reaches through one render node, as AMD's
+    /// and Intel's are. Only that node is granted, so the other cards' device files are not
+    /// reachable from this process. `memory_device` is the device that makes a dma-buf of the
+    /// guest's memory, on a PC that has it and for a backend that uses it: a rule can't name a file
+    /// that isn't there, and the backend does without it.
+    pub fn of_render_node(
         slot: crate::slot::Slot,
         project: &Path,
         driver_folder: &Path,
@@ -110,6 +116,24 @@ impl Needs {
             shared_files: Vec::new(),
             devices: std::iter::once(render_node).chain(memory_device).collect(),
             driver_folder: Some(driver_folder.to_owned()),
+            read_files: Vec::new(),
+        }
+    }
+
+    /// What the daemon of this slot needs when a recording stands in for its card: that file, to
+    /// read, and no device at all, so a lab run can't reach any card on the PC.
+    pub fn of_recorded_card(
+        slot: crate::slot::Slot,
+        project: &Path,
+        driver_folder: &Path,
+        recording: PathBuf,
+    ) -> Self {
+        Self {
+            run_folder: slot.run_folder(project),
+            shared_files: Vec::new(),
+            devices: Vec::new(),
+            driver_folder: Some(driver_folder.to_owned()),
+            read_files: vec![recording],
         }
     }
 }
@@ -124,6 +148,7 @@ impl Needs {
             shared_files: vec![snapshot],
             devices: host_gpu_devices(),
             driver_folder: Some(driver_folder.to_owned()),
+            read_files: Vec::new(),
         }
     }
 }
@@ -234,7 +259,7 @@ mod tests {
         let devices_of = |memory_device: Option<&str>| {
             let slot = crate::slot::Slot::parse(Some("2")).unwrap();
             let node = PathBuf::from("/dev/dri/renderD129");
-            let needs = Needs::of_amd_card(
+            let needs = Needs::of_render_node(
                 slot,
                 Path::new("/project"),
                 Path::new("/store/driver"),
@@ -248,6 +273,21 @@ mod tests {
         assert_eq!(devices_of(None), ["/dev/dri/renderD129"]);
     }
 
+    #[cfg(any(feature = "amd", feature = "intel"))]
+    #[test]
+    fn a_recorded_card_is_read_and_no_device_is_reachable() {
+        let needs = Needs::of_recorded_card(
+            crate::slot::Slot::parse(Some("2")).unwrap(),
+            Path::new("/run/user/1000/guesthouse"),
+            Path::new("/store/intel"),
+            "/lab/arc-b580.card".into(),
+        );
+        let plan = needs.plan();
+        assert!(needs.devices.is_empty());
+        assert!(!plan.paths.iter().any(|(grant, _)| *grant == Grant::Device));
+        assert!(plan.paths.contains(&(Grant::Read, "/lab/arc-b580.card".into())));
+    }
+
     #[test]
     fn its_own_folder_is_the_only_one_it_can_change() {
         let needs = Needs {
@@ -255,6 +295,7 @@ mod tests {
             shared_files: vec!["/dev/shm/gpupv-sensors-1000-2".into()],
             devices: vec!["/dev/nvidiactl".into()],
             driver_folder: Some("/store/driver".into()),
+            read_files: Vec::new(),
         };
         let plan = needs.plan();
         let owned: Vec<_> = plan.paths.iter().filter(|(grant, _)| *grant == Grant::Own).collect();
