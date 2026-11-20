@@ -35,7 +35,9 @@ mod screen_copy;
 mod sdma_copy;
 mod space_vm;
 mod submit;
+mod traffic;
 mod udmabuf;
+mod watch;
 
 pub use device::{Device, Mapping};
 pub use fence_ib::{Writer as FenceWriter, words as fence_words, writer_for as fence_writer_for};
@@ -67,7 +69,7 @@ use guesthouse_backend::{
     RegistryName, RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface,
     Status, SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
-use nodes::nodes;
+use nodes::{Node, nodes};
 use run_wait::Patience;
 use screen_copy::{CopyPlan, PIXEL_BYTES};
 use sdma_copy::{EngineForm, LinearCopy, TiledCopy};
@@ -506,6 +508,115 @@ fn unmapped_dma_reach(memory: &HashMap<MemoryId, Bo>, space: &SpaceVm, ibs: &[Ib
     named.find(|reach| !space.covers(reach.address, reach.bytes))
 }
 
+/// Answers an escape where it lies, and logs how. Every escape has an `amd escape` line at debug,
+/// which says the same and more of the ones that get no line of their own here.
+fn answer_escape(process: u32, data: &mut [u8]) {
+    // The answer is written into the buffer the escape came in, so the log takes its copy first.
+    let asked = traffic::escape_asked(process, data);
+    let answered = protocol::escape::answer(data);
+    match &answered {
+        Ok(answered) if !answered.done && answered.code.needed_by_the_guest() => log::warn!(
+            "escape from {process}: service {} subfunction {:#x}, not shaped as the guest's driver \
+             sends it, answered as failed; the guest can't go on without it",
+            answered.code.service,
+            answered.code.subfunction
+        ),
+        Ok(_) => {}
+        Err(refused) => log::info!(
+            "an escape from {process} is {} ({} bytes, starting {})",
+            refused.0,
+            data.len(),
+            protocol::bytes::first_dwords(data, 4)
+        ),
+    }
+    traffic::escape_answered(process, asked, &answered);
+}
+
+/// The answer to an adapter query this backend owns, appended to `out`, or `None` for one it leaves
+/// to the core.
+fn own_answer(info: &DeviceInfo, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {
+    if query.kind == guesthouse_backend::guest_text::QUERY_USER_DRIVER_NAME {
+        protocol::guest_driver::write_name(query, out);
+        return Some(Status::SUCCESS);
+    }
+    if query.kind == protocol::api_drivers::QUERY_OPENGL {
+        protocol::api_drivers::write_opengl_info(query, out);
+        return Some(Status::SUCCESS);
+    }
+    if let Some(status) = protocol::adapter_registry::answer(query, out) {
+        return Some(status);
+    }
+    if let Some(status) = protocol::wddm_caps::answer(query, out) {
+        return Some(status);
+    }
+    if let Some(status) = protocol::gpu_mmu_caps::answer(query, out) {
+        return Some(status);
+    }
+    if let Some(status) = protocol::node_metadata::answer(query, &info.engines, out) {
+        return Some(status);
+    }
+    protocol::adapter_info::answer(query, info, out)
+}
+
+/// Answers an adapter query as [`own_answer`] does, and logs that it was asked.
+fn answer_query(info: &DeviceInfo, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {
+    let answer = own_answer(info, query, out);
+    traffic::query(query, answer);
+    answer
+}
+
+/// The registry value this backend has under a name, logged when it has one. A name it has no value
+/// for is the core's to log.
+fn registry_answer(name: &RegistryName) -> Option<RegistryValue> {
+    let value = protocol::guest_driver::registry(name);
+    if let Some(value) = &value {
+        traffic::registry(name, value);
+    }
+    value
+}
+
+/// Reads a submission as far as the card's readings go, and logs what its private data holds: the
+/// engine behind its node and the command buffers it names, or `None` for one its queue fails on.
+fn submission_read(info: &DeviceInfo, work: &Work<'_>) -> Option<(Node, Vec<Ib>)> {
+    // The kernel driver fails a submission whose private data is wrong, and the guest then
+    // treats the device as lost, so the queue stops here the same way.
+    let submission = match protocol::command_data::check(work.private) {
+        Ok(submission) => submission,
+        Err(refused) => {
+            log::warn!("refused a submission on queue {:#x}: {}", work.queue, refused.0);
+            traffic::submission_refused(work, refused.0);
+            return None;
+        }
+    };
+    let Some(node) = nodes(&info.engines).get(work.node as usize).copied() else {
+        log::warn!("work for node {}, which this card hasn't got", work.node);
+        return None;
+    };
+    let ibs: Vec<Ib> = protocol::command_data::command_buffers(work.private)
+        .into_iter()
+        .map(|buffer| Ib { address: buffer.address, bytes: buffer.bytes })
+        .collect();
+    traffic::submission(work, node.ip_type, &submission, &ibs);
+    Some((node, ibs))
+}
+
+/// Whether the kernel driver would take a new context's private data, and logs what it holds.
+fn context_taken(process: u32, node: u32, private: &[u8]) -> bool {
+    let checked = protocol::context::check(private);
+    if let Err(refused) = &checked {
+        log::info!("refused a context on node {node}: {}", refused.0);
+    }
+    traffic::context(process, node, private, &checked);
+    checked.is_ok()
+}
+
+/// Checks a new hardware queue's private data, which nothing is written back into, and logs it.
+fn queue_checked(queue: u32, serial: u32, private: &[u8]) -> Result<(), BackendError> {
+    let checked = protocol::hw_queue::check(private);
+    traffic::queue(queue, serial, private, checked);
+    checked.map_err(|refused| BackendError::new(refused.0))
+}
+
 /// Builds the facts the guest is told from the card's own readings.
 fn facts_from(info: &DeviceInfo) -> AdapterFacts {
     AdapterFacts {
@@ -777,69 +888,21 @@ impl Backend for AmdBackend {
     /// The kernel driver writes nothing back into private data the guest built.
     fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {}
 
-    fn finish_queue_data(
-        &mut self,
-        _queue: u32,
-        private: &mut [u8],
-        _serial: u32,
-    ) -> Result<(), BackendError> {
-        protocol::hw_queue::check(private).map_err(|refused| BackendError::new(refused.0))
+    fn finish_queue_data(&mut self, queue: u32, private: &mut [u8], serial: u32) -> Result<(), BackendError> {
+        queue_checked(queue, serial, private)
     }
 
     /// The answer is in the escape's own header. The trait has no status to return beside it.
     fn escape(&mut self, process: u32, data: &mut [u8], _books: &GuestBooks<'_>) {
-        match protocol::escape::answer(data) {
-            Ok(answered) if answered.done => log::debug!(
-                "escape from {process}: service {} subfunction {:#x}, answered as done",
-                answered.code.service,
-                answered.code.subfunction
-            ),
-            Ok(answered) if answered.code.needed_by_the_guest() => log::warn!(
-                "escape from {process}: service {} subfunction {:#x}, not shaped as the guest's driver \
-                 sends it, answered as failed; the guest can't go on without it",
-                answered.code.service,
-                answered.code.subfunction
-            ),
-            Ok(answered) => log::debug!(
-                "escape from {process}: service {} subfunction {:#x}, answered as failed",
-                answered.code.service,
-                answered.code.subfunction
-            ),
-            Err(refused) => log::info!(
-                "an escape from {process} is {} ({} bytes, starting {})",
-                refused.0,
-                data.len(),
-                protocol::bytes::first_dwords(data, 4)
-            ),
-        }
+        answer_escape(process, data);
     }
 
     fn adapter_answer(&mut self, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {
-        if query.kind == guesthouse_backend::guest_text::QUERY_USER_DRIVER_NAME {
-            protocol::guest_driver::write_name(query, out);
-            return Some(Status::SUCCESS);
-        }
-        if query.kind == protocol::api_drivers::QUERY_OPENGL {
-            protocol::api_drivers::write_opengl_info(query, out);
-            return Some(Status::SUCCESS);
-        }
-        if let Some(status) = protocol::adapter_registry::answer(query, out) {
-            return Some(status);
-        }
-        if let Some(status) = protocol::wddm_caps::answer(query, out) {
-            return Some(status);
-        }
-        if let Some(status) = protocol::gpu_mmu_caps::answer(query, out) {
-            return Some(status);
-        }
-        if let Some(status) = protocol::node_metadata::answer(query, &self.device.info().engines, out) {
-            return Some(status);
-        }
-        protocol::adapter_info::answer(query, self.device.info(), out)
+        answer_query(self.device.info(), query, out)
     }
 
     fn registry_value(&mut self, name: &RegistryName) -> Option<RegistryValue> {
-        protocol::guest_driver::registry(name)
+        registry_answer(name)
     }
 
     fn gpu_clock(&mut self) -> Result<u64, BackendError> {
@@ -860,31 +923,14 @@ impl Backend for AmdBackend {
     }
 
     /// The kernel driver writes nothing back into a context's private data, so it is only checked.
-    fn context_data_valid(&mut self, _process: u32, node: u32, private: &[u8]) -> bool {
-        match protocol::context::check(private) {
-            Ok(_) => true,
-            Err(refused) => {
-                log::info!("refused a context on node {node}: {}", refused.0);
-                false
-            }
-        }
+    fn context_data_valid(&mut self, process: u32, node: u32, private: &[u8]) -> bool {
+        context_taken(process, node, private)
     }
 
     fn start_work(&mut self, _host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
-        // The kernel driver fails a submission whose private data is wrong, and the guest then
-        // treats the device as lost, so the queue stops here the same way.
-        if let Err(refused) = protocol::command_data::check(work.private) {
-            log::warn!("refused a submission on queue {:#x}: {}", work.queue, refused.0);
-            return WorkStart::QueueFailed;
-        }
-        let Some(node) = nodes(&self.device.info().engines).get(work.node as usize).copied() else {
-            log::warn!("work for node {}, which this card hasn't got", work.node);
+        let Some((node, mut ibs)) = submission_read(self.device.info(), work) else {
             return WorkStart::QueueFailed;
         };
-        let mut ibs: Vec<Ib> = protocol::command_data::command_buffers(work.private)
-            .into_iter()
-            .map(|buffer| Ib { address: buffer.address, bytes: buffer.bytes })
-            .collect();
         if ibs.is_empty() || !work.may_run || work.queue_failed {
             return WorkStart::Finished;
         }
@@ -915,7 +961,6 @@ impl Backend for AmdBackend {
             );
             return WorkStart::QueueFailed;
         }
-        log::debug!("run on engine family {} in space {:?}: {:x?}", node.ip_type, work.space, ibs);
         let card = self.device.info();
         let writer = fence_ib::writer_for(node.ip_type, card.details.gfx_version.0)
             .filter(|_| space.vm.holds(work.fence_gpu_address, FENCE_BYTES));
