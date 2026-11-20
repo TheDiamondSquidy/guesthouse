@@ -1,5 +1,6 @@
 //! Looks at this PC. Nothing here changes anything.
 
+use super::access::{check_jail, check_render_nodes};
 use super::cards::{Card, Support, amd_support, card_in_use, find_cards};
 use crate::context::Context;
 use crate::gpu_maker::GpuMaker;
@@ -8,12 +9,13 @@ use crate::iso::any_iso_maker;
 use crate::library::INSTALL_ROOM_GIB;
 use crate::linux::amd::amd_cards;
 use crate::linux::driver_versions::{branch_refusal, branch_refusal_among, untested_warning};
-use crate::machine::{MIN_RAM_GIB, Machine};
+use crate::machine::{Kind, MIN_RAM_GIB, Machine, load_all};
 use crate::setup::intel::{intel_cards_on_i915, supported_intel_cards, xe_force_probe};
 use crate::usb::sysfs_text;
 use crate::vm_args::on_path;
 use guesthouse_backend_nvidia::profile::BRANCHES;
 use rustix::fs::{Access, access};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -124,15 +126,20 @@ pub fn gpu_verdict(checks: &[Check]) -> GpuVerdict {
 }
 
 impl Check {
-    fn new(title: &str, state: CheckState, text: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub(super) fn new(
+        title: &str,
+        state: CheckState,
+        text: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
         Self { title: title.to_owned(), state, text: text.into(), fix: fix.into(), part: Part::Pc }
     }
 
-    fn ok(title: &str, text: impl Into<String>) -> Self {
+    pub(super) fn ok(title: &str, text: impl Into<String>) -> Self {
         Self::new(title, CheckState::Ok, text, "")
     }
 
-    fn about(self, part: Part) -> Self {
+    pub(super) fn about(self, part: Part) -> Self {
         Self { part, ..self }
     }
 }
@@ -346,6 +353,8 @@ fn check_kvm(context: &Context) -> Check {
 fn check_amd_memory(context: &Context) -> Option<Check> {
     const TITLE: &str = "AMD card's guest memory";
     const SLOWER: &str = "Windows on the AMD card works without it, only slower.";
+    // So that a guest's largest buffers aren't refused.
+    const WANTED_LIMIT_MIB: u64 = 16384;
     if amd_cards(context).is_empty() {
         return None;
     }
@@ -359,6 +368,18 @@ fn check_amd_memory(context: &Context) -> Option<Check> {
             "It usually belongs to the kvm group: run sudo usermod -aG kvm $USER, then log in again. {SLOWER}"
         );
         return Some(Check::new(TITLE, CheckState::Warning, format!("This user cannot open {device}."), fix));
+    }
+    let limit =
+        fs::read_to_string(&context.udmabuf_limit).ok().and_then(|text| text.trim().parse::<u64>().ok());
+    if let Some(limit) = limit.filter(|limit| *limit < WANTED_LIMIT_MIB) {
+        let setting = context.udmabuf_limit.display();
+        let fix = format!(
+            "Larger buffers go to the card the slow way, which costs the daemon more CPU. Raise it with \
+             echo {WANTED_LIMIT_MIB} | sudo tee {setting}, and keep it with \
+             udmabuf.size_limit_mb={WANTED_LIMIT_MIB} on the kernel's command line."
+        );
+        let text = format!("{device} makes buffers of at most {limit} MiB.");
+        return Some(Check::new(TITLE, CheckState::Warning, text, fix));
     }
     Some(Check::ok(TITLE, format!("{device} can be opened.")))
 }
@@ -500,16 +521,21 @@ pub fn existing_parent(path: &Path) -> PathBuf {
     path.ancestors().find(|folder| folder.exists()).unwrap_or(Path::new("/")).to_owned()
 }
 
-/// Judges the disk: `room` is what is free in `place`.
-fn judge_disk(room: f64, place: &Path) -> Check {
+/// Judges the disk: `room` is what is free in `place`. Only a new Windows machine needs that much, so
+/// with one made already, too little is a warning.
+fn judge_disk(room: f64, place: &Path, windows_made: bool) -> Check {
     const TITLE: &str = "Free disk";
     let need = INSTALL_ROOM_GIB + DRIVER_ROOM_GIB;
     let text = format!("{room:.0} GiB free in {}.", place.display());
-    if room < need as f64 {
-        let fix = format!("A Windows machine needs {need} GiB. Free some space there.");
-        return Check::new(TITLE, CheckState::Failed, text, fix);
+    if room >= need as f64 {
+        return Check::ok(TITLE, text);
     }
-    Check::ok(TITLE, text)
+    if windows_made {
+        let fix = format!("A new Windows machine needs {need} GiB. The ones made already still start.");
+        return Check::new(TITLE, CheckState::Warning, text, fix);
+    }
+    let fix = format!("A Windows machine needs {need} GiB. Free some space there.");
+    Check::new(TITLE, CheckState::Failed, text, fix)
 }
 
 fn check_disk(context: &Context) -> Check {
@@ -524,13 +550,16 @@ fn check_disk(context: &Context) -> Check {
             fix,
         );
     }
-    judge_disk(free_gib(&place).unwrap_or(0.0), &place)
+    let windows_made = load_all(context).0.iter().any(|machine| machine.kind == Kind::Windows);
+    judge_disk(free_gib(&place).unwrap_or(0.0), &place, windows_made)
 }
 
 pub fn check_pc(context: &Context) -> Vec<Check> {
     let mut checks = check_cards(context);
+    checks.extend(check_render_nodes(context));
     checks.extend(nvidia_checks(context));
     checks.push(check_kvm(context));
+    checks.extend(check_jail(context));
     checks.extend(check_amd_memory(context));
     checks.extend([
         check_qemu(context),
@@ -569,10 +598,12 @@ pub struct HostReport {
 
 pub fn check_host(context: &Context) -> HostReport {
     let mut deciding = check_cards(context);
+    deciding.extend(check_render_nodes(context));
     if !find_cards(context).is_empty() {
         deciding.push(check_host_driver(context).about(Part::Nvidia));
     }
     deciding.push(check_kvm(context));
+    deciding.extend(check_jail(context));
     deciding.extend(check_driver_branch(context).filter(|_| !find_cards(context).is_empty()));
     let gpu = gpu_verdict(&deciding).any();
     deciding.extend(check_amd_memory(context));
@@ -813,6 +844,16 @@ mod tests {
         fs::write(&context.udmabuf, "").unwrap();
         fs::set_permissions(&context.udmabuf, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(check_amd_memory(&context).unwrap().state, CheckState::Ok);
+        fs::write(&context.udmabuf_limit, "64\n").unwrap();
+        let found = check_amd_memory(&context).unwrap();
+        assert!(
+            found.state == CheckState::Warning
+                && found.text.contains("64 MiB")
+                && found.fix.contains("size_limit_mb=16384"),
+            "{found:?}"
+        );
+        fs::write(&context.udmabuf_limit, "16384\n").unwrap();
+        assert_eq!(check_amd_memory(&context).unwrap().state, CheckState::Ok);
         fs::set_permissions(&context.udmabuf, fs::Permissions::from_mode(0o000)).unwrap();
         let found = check_amd_memory(&context).unwrap();
         assert!(
@@ -953,8 +994,15 @@ mod tests {
     #[test]
     fn the_driver_needs_room_too() {
         let place = Path::new("/");
-        assert_eq!(judge_disk(INSTALL_ROOM_GIB as f64, place).state, CheckState::Failed);
-        assert_eq!(judge_disk((INSTALL_ROOM_GIB + DRIVER_ROOM_GIB) as f64, place).state, CheckState::Ok);
+        assert_eq!(judge_disk(INSTALL_ROOM_GIB as f64, place, false).state, CheckState::Failed);
+        let room = (INSTALL_ROOM_GIB + DRIVER_ROOM_GIB) as f64;
+        assert_eq!(judge_disk(room, place, false).state, CheckState::Ok);
+    }
+
+    #[test]
+    fn with_a_windows_machine_made_too_little_room_is_only_a_warning() {
+        let found = judge_disk(42.0, Path::new("/"), true);
+        assert!(found.state == CheckState::Warning && found.fix.contains("new Windows machine"), "{found:?}");
     }
 
     #[test]

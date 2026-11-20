@@ -116,5 +116,14 @@ pub fn scratch_context(scratch: &Scratch) -> Context {
     // A test's pretend programs are shell scripts, which no jail would let run as they do.
     context.jail_offer = |_| crate::jailing::Offer::nothing();
     context.ram_limit = Some(PLENTY_OF_GIB);
+    // Nor is it short of RAM, however little this PC has free.
+    let plenty_kib = PLENTY_OF_GIB << 20;
+    context.meminfo =
+        scratch.write("meminfo", format!("MemTotal: {plenty_kib} kB\nMemAvailable: {plenty_kib} kB\n"));
+    // Nor does it lack the jail, its cards' devices or udmabuf's room, whatever this PC has.
+    context.jail_support = || guesthouse_jail::Support { landlock_abi: 10, seccomp: true };
+    context.may_open = |_| true;
+    context.security_modules = scratch.write("lsm", "capability,landlock");
+    context.udmabuf_limit = scratch.path("udmabuf-limit");
     context
 }
