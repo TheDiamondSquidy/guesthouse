@@ -277,6 +277,7 @@ fn library_machines(context: &Arc<Context>, window: &Window, folder: &Path) -> V
         amd_gpu: None,
         disk_place: String::new(),
         gpu_maker: None,
+        access: guesthouse_app_core::remote_access::Access::NEW,
     };
     let plain = create(context, &new).unwrap();
     let disk = folder.join("win.qcow2").display().to_string();
@@ -343,6 +344,11 @@ async fn settings_pages(window: Window, folder: PathBuf, failures: Rc<Cell<u32>>
     show_page(&window, "network");
     glib::timeout_future(SETTLE).await;
     shot_after_paint(&window, &folder, "09-settings-network-nat").await;
+    check(
+        &failures,
+        text_of(&window).contains("Remote Access"),
+        "a Windows machine has Remote Desktop and SSH",
+    );
     let combos = all_of::<adw::ComboRow>(&window);
     let mode = combos.iter().find(|row| row.title() == "Mode").unwrap();
     mode.set_selected(2);
