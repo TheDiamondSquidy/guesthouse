@@ -134,6 +134,9 @@ impl VmPlan {
     }
 
     fn firmware_code(&self) -> &Path {
+        if let Some(boot) = self.macos_boot() {
+            return &boot.firmware_code;
+        }
         if self.tpm.is_some() { &self.firmware.code_secure } else { &self.firmware.code }
     }
 
@@ -177,6 +180,7 @@ impl VmPlan {
         }
         self.grant_forwarding(&mut plan, devices);
         self.grant_amd(&mut plan);
+        self.grant_macos(&mut plan);
         if let Some(folder) = self.shared_folder() {
             plan.grant(Grant::Run, &self.share_program).grant(Grant::Own, folder);
         }
@@ -269,6 +273,7 @@ impl VmPlan {
             tap: self.tap(),
             unix_sockets: self.unix_sockets(),
             no_new_unix_sockets: self.passes_unix_sockets(),
+            reads_own_memory: self.macos_boot().is_some(),
             program: Vec::new(),
         };
         let launcher = jail.launcher.display().to_string();
@@ -281,6 +286,7 @@ impl VmPlan {
                     tap: jailing.tap.take(),
                     unix_sockets: Vec::new(),
                     no_new_unix_sockets: false,
+                    reads_own_memory: false,
                     program: Vec::new(),
                 };
                 words.push(launcher.clone());

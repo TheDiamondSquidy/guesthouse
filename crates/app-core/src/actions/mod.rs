@@ -19,6 +19,8 @@ mod identity_switch;
 mod install;
 mod intel_device;
 mod intel_files;
+mod macos;
+mod macos_install;
 mod nvme_move;
 mod own_linux;
 mod remote_access;
@@ -137,6 +139,8 @@ impl<'a> Task<'a> {
     }
 }
 
+pub use macos::start_refusal as macos_start_refusal;
+
 /// The plan for this machine, in this task's slot, as things stand on the PC now.
 pub fn plan_for(context: &Context, machine: &Machine, boot: Boot) -> VmPlan {
     let mates = card_mates(machine, &other_machines(context), &setup_card(context));
@@ -164,6 +168,9 @@ pub fn start(task: &mut Task) -> Result<()> {
     }
     if task.machine.own_linux_gpu() {
         return own_linux::start(task);
+    }
+    if task.machine.macos() {
+        return macos::start(task);
     }
     let machine = task.machine.clone();
     if machine.has_gpu() {
@@ -380,12 +387,21 @@ fn after_reboot(task: &mut Task) -> Result<()> {
     set_up_desktop(task)
 }
 
+/// macOS takes no request to shut down at its login screen, by key or by power button, and holds one
+/// up while it asks about a document that isn't saved.
+const MACOS_TURNED_OFF: &str = "macOS did not shut down, so the VM was turned off. It only shuts down \
+                                when asked once someone is logged in, and waits if a document isn't saved.";
+
 fn stop(task: &mut Task) -> Result<()> {
     let gpu = task.machine.has_gpu();
     task.step(if gpu { "Shutting down Windows" } else { "Shutting down" });
     if task.host.stop(&task.machine, STOP_WAIT_SECONDS)? == Stopped::TurnedOff {
         let who = if gpu { "Windows" } else { "The guest" };
-        task.error = format!("{who} did not shut down in time, so the VM was turned off.");
+        task.error = if task.machine.macos() {
+            MACOS_TURNED_OFF.to_owned()
+        } else {
+            format!("{who} did not shut down in time, so the VM was turned off.")
+        };
     }
     Ok(())
 }
@@ -478,6 +494,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
             Ok(())
         }
         crate::remote_access::APPLY_TASK => remote_access::apply_change(task),
+        "install" if task.machine.macos() => macos_install::install(task),
         "install" if task.machine.kind == Kind::Linux => ubuntu::install(task),
         "install" => install(task),
         "take_snapshot" => take_snapshot(task, text),

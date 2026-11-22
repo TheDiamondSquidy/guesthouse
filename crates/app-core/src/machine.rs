@@ -255,6 +255,10 @@ pub struct Machine {
     /// older build can still read it.
     #[serde(default, skip_serializing_if = "is_off")]
     pub nvme: bool,
+    /// The OpenCore image of a plain machine that holds macOS, which it boots through. Its GPU is
+    /// reims-vgpu's device. Left out of the file when empty, so an older build can still read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub opencore: String,
 }
 
 impl Machine {
@@ -302,6 +306,7 @@ impl Machine {
             file_drop_off: false,
             disk_folder: String::new(),
             nvme: false,
+            opencore: String::new(),
         }
     }
 
@@ -378,6 +383,11 @@ impl Machine {
         self.kind == Kind::Plain && self.linux_gpu
     }
 
+    /// Whether this plain machine holds macOS.
+    pub fn macos(&self) -> bool {
+        self.kind == Kind::Plain && !self.opencore.is_empty()
+    }
+
     /// The AMD card a Linux guest's GPU is to be, by its PCI address, if it has the GPU and it's AMD's.
     pub fn amd_card(&self) -> Option<&str> {
         let linux_gpu = self.wants_forwarded_gpu() || self.own_linux_gpu();
@@ -444,6 +454,9 @@ impl Machine {
     pub fn summary_showing(&self, screen: &str) -> String {
         let (kind, cores, ram) = (self.kind.name(), self.cores, self.ram_gib);
         match self.kind {
+            Kind::Plain if self.macos() => {
+                format!("macOS, {cores} cores, {ram} GiB, {}, GPU preview", self.screen)
+            }
             Kind::Plain if self.linux_gpu => format!("{kind}, {cores} cores, {ram} GiB, Linux GPU preview"),
             Kind::Plain => format!("{kind}, {cores} cores, {ram} GiB, no GPU acceleration"),
             Kind::Linux if self.gpu_preview => format!("{kind}, {cores} cores, {ram} GiB, GPU preview"),
@@ -651,6 +664,16 @@ mod tests {
 
     fn sample() -> Machine {
         Machine::new("sample", "Sample", "/d", "/v")
+    }
+
+    #[test]
+    fn a_plain_machine_with_an_opencore_image_is_a_mac_and_says_so() {
+        let plain = Machine { kind: Kind::Plain, ..sample() };
+        assert!(!plain.macos() && plain.summary().ends_with("no GPU acceleration"));
+        let mac = Machine { opencore: "/m/mac/opencore.qcow2".into(), ..plain };
+        assert!(mac.macos());
+        assert_eq!(mac.summary(), "macOS, 8 cores, 16 GiB, 1920x1080, GPU preview");
+        assert!(!Machine { opencore: "/o".into(), ..sample() }.macos(), "only a plain machine");
     }
 
     #[test]
