@@ -25,7 +25,7 @@ They're in `crates/`, listed here from the bottom up. Each depends only on crate
 | `transport` | The byte stream from QEMU: frames, packet kinds, guest page ranges. |
 | `messages` | What the guest's messages look like, and how to write the answers. No state, no decisions. |
 | `sensors` | The host card's newest readings, in a small file any process of the user can read. |
-| `jail` | What a guest-facing process may still do once it's jailed: Landlock, seccomp, and no new privileges. |
+| `jail` | What a guest-facing process may still do once it's jailed: Landlock, seccomp, and no new privileges on Linux; an AppContainer, process mitigations and a job on Windows. |
 | `backend` | The `Backend` trait: what a GPU vendor must provide. Also the decision on whether to start. |
 | `backend-standin` | A pretend GPU, for tests only. |
 | `backend-nvidia` | The NVIDIA backend: the host's resource manager, channels, and what the guest's driver expects to hear. |
@@ -37,6 +37,11 @@ They're in `crates/`, listed here from the bottom up. Each depends only on crate
 | `replay` | Replays a recording and compares every reply. |
 | `app-core` | The desktop app's work with no UI: machines, tasks, setup, a VM's start, `guesthouse-task`, `guesthouse-share` and `guesthouse-vm`. |
 | `app` | The desktop app's GTK 4 and libadwaita pages. |
+| `hcs` | A Windows host's Host Compute System: the machine document as types, and the calls into `computecore.dll`, `computenetwork.dll` and `virtdisk.dll` that run a VM with only Virtual Machine Platform on. It stands apart from the rest, and only its document builds off Windows. `host-windows` makes and runs Windows and Ubuntu guests with GPU-PV through it, telling what happens through an event sink, and `tools/hcs-boot` is that from the command line, as in [docs/windows-host.md](docs/windows-host.md). |
+| `control` | The words on the pipe between Guesthouse's app and its service on a Windows host: each request, its answers, and the app's end of the pipe. |
+| `service-windows` | The Guesthouse service on a Windows host. It runs as the system, as HCS needs, keeps the machines in a folder of its own, does `host-windows`'s work for the app, and keeps every rule itself, as the app runs as a user who isn't an administrator. |
+| `app-windows` | The app on a Windows host: a WinUI 3 window, through the vendored windows-reactor, that lists the machines and starts, stops, makes and deletes them. It only asks the Guesthouse service, in `control`'s words on the service's pipe, and holds no rule of its own. Off Windows it's a stub. |
+| `installer-windows` | The installer and uninstaller for a Windows host, `guesthouse-setup-VERSION.exe`: one file with the files to install and the Windows App Runtime its own pages need packed into it. It asks for an administrator once, shows its steps in WinUI 3 pages, and leaves the system's work (Virtual Machine Platform, the service) to `windows/installer/setup.ps1`. |
 
 To follow one message, start at `Server::read_channel` in `daemon`, go through `Router::handle_frame`, and land in `Session::dispatch` in `core/src/session/mod.rs`. The handlers are grouped by subject in that folder.
 

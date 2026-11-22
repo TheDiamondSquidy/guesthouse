@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/card-check"]
+members = ["crates/*", "tools/card-check", "tools/hcs-boot"]
+# Microsoft's windows-reactor and the windows-rs crates it needs, vendored for the Windows app and
+# used by path from it. Not members: Windows only, and not this workspace's code.
+exclude = ["vendor/windows-reactor", "vendor/windows-rs"]
 # The app needs GTK's development files, which nothing else here does. Build it with `-p guesthouse-app`.
 default-members = [
     "crates/app-core",
@@ -8,15 +11,21 @@ default-members = [
     "crates/backend-intel",
     "crates/backend-nvidia",
     "crates/backend-standin",
+    "crates/control",
     "crates/core",
     "crates/daemon",
     "crates/frame-socket",
+    "crates/hcs",
+    "crates/host-windows",
+    "crates/installer-windows",
     "crates/jail",
     "crates/messages",
     "crates/replay",
     "crates/sensors",
+    "crates/service-windows",
     "crates/transport",
     "tools/card-check",
+    "tools/hcs-boot",
 ]
 
 [workspace.package]
@@ -41,6 +50,9 @@ guesthouse-frame-socket = { path = "crates/frame-socket" }
 guesthouse-sensors = { path = "crates/sensors" }
 guesthouse-jail = { path = "crates/jail" }
 guesthouse-card-check = { path = "tools/card-check" }
+guesthouse-control = { path = "crates/control" }
+guesthouse-hcs = { path = "crates/hcs" }
+guesthouse-host-windows = { path = "crates/host-windows" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
