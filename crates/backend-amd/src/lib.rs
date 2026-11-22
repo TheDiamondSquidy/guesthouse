@@ -1042,12 +1042,18 @@ fn answer_query(info: &DeviceInfo, query: &VendorQuery<'_>, out: &mut Vec<u8>) -
 
 /// The registry value this backend has under a name, logged when it has one. A name it has no value
 /// for is the core's to log.
-fn registry_answer(name: &RegistryName) -> Option<RegistryValue> {
-    let value = protocol::guest_driver::registry(name);
+fn registry_answer(name: &RegistryName, card_name: &str) -> Option<RegistryValue> {
+    let value = protocol::guest_driver::registry(name, card_name);
     if let Some(value) = &value {
         traffic::registry(name, value);
     }
     value
+}
+
+/// The DMA buffer a submission message names, or zero. The core gives a context's submission its
+/// commands only for a backend that runs them, so on AMD only a hardware queue's names one.
+fn named_dma_buffer(work: &Work<'_>) -> u64 {
+    work.commands.map_or(0, |commands| commands.address)
 }
 
 /// Reads a submission as far as the card's readings go, and logs what its private data holds: the
@@ -1055,7 +1061,7 @@ fn registry_answer(name: &RegistryName) -> Option<RegistryValue> {
 fn submission_read(info: &DeviceInfo, work: &Work<'_>) -> Option<(Node, Vec<Ib>)> {
     // The kernel driver fails a submission whose private data is wrong, and the guest then
     // treats the device as lost, so the queue stops here the same way.
-    let submission = match protocol::command_data::check(work.private) {
+    let submission = match protocol::command_data::check(work.private, named_dma_buffer(work)) {
         Ok(submission) => submission,
         Err(refused) => {
             log::warn!("refused a submission on queue {:#x}: {}", work.queue, refused.0);
@@ -1406,7 +1412,7 @@ impl Backend for AmdBackend {
     }
 
     fn registry_value(&mut self, name: &RegistryName) -> Option<RegistryValue> {
-        registry_answer(name)
+        registry_answer(name, &self.facts.name)
     }
 
     fn gpu_clock(&mut self) -> Result<u64, BackendError> {

@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn a_submission_says_what_the_check_read_and_which_buffers_it_names() {
         let data = submission_data();
-        let submission = command_data::check(&data).unwrap();
+        let submission = command_data::check(&data, 0).unwrap();
         let buffers: Vec<Ib> = command_data::command_buffers(&data)
             .into_iter()
             .map(|buffer| Ib { address: buffer.address, bytes: buffer.bytes })
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn the_empty_marker_and_a_context_submission_that_may_not_run_read_plainly() {
         let data = [0xAA, 0, 0, 0, 0, 0, 0, 0];
-        let submission = command_data::check(&data).unwrap();
+        let submission = command_data::check(&data, 0).unwrap();
         let work =
             Work { source: WorkSource::Context, may_run: false, queue_failed: true, ..work_with(&data) };
         let line = SubmitLine { work: &work, engine_family: 0, submission: &submission, buffers: &[] };
@@ -935,7 +935,7 @@ mod tests {
     fn a_refused_submission_shows_why_and_how_it_starts() {
         let mut data = submission_data();
         put_dword(&mut data, 8, 7);
-        let why = command_data::check(&data).unwrap_err().0;
+        let why = command_data::check(&data, 0).unwrap_err().0;
         let work = work_with(&data);
         assert_eq!(
             RefusedSubmitLine { work: &work, why }.to_string(),
@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn a_submission_has_one_line_and_none_with_debug_lines_off() {
         let data = submission_data();
-        let submission = command_data::check(&data).unwrap();
+        let submission = command_data::check(&data, 0).unwrap();
         let work = work_with(&data);
         let both = || {
             super::submission(&work, 0, &submission, &[]);
@@ -1034,7 +1034,10 @@ mod tests {
             .map(|buffer| Ib { address: buffer.address, bytes: buffer.bytes })
             .collect();
         let engine = crate::nodes::nodes(&info.engines).get(work.node as usize).copied();
-        command_data::check(work.private).ok().and(engine).map(|engine| (engine, buffers))
+        command_data::check(work.private, crate::named_dma_buffer(work))
+            .ok()
+            .and(engine)
+            .map(|engine| (engine, buffers))
     }
 
     /// A submission to read, the warning it should bring, and what its debug line should hold.
@@ -1105,6 +1108,27 @@ mod tests {
     }
 
     #[test]
+    fn vulkans_empty_submission_is_taken_with_nothing_to_run_unless_it_names_a_dma_buffer() {
+        let info = full_card();
+        // Client 9 and no records: what AMD's Vulkan driver sends for vkQueueSubmit with no command
+        // buffers, and for an acquire that only signals a fence.
+        let empty = [9u8, 0, 0, 0, 0, 0, 0, 0];
+        let (engine, buffers) = crate::submission_read(&info, &work_with(&empty)).unwrap();
+        assert_eq!(engine.ip_type, crate::info::HW_IP_COMPUTE);
+        assert!(buffers.is_empty(), "nothing runs, so the core completes the fence");
+        let naming = Work {
+            commands: Some(guesthouse_backend::CommandBuffer { address: 0x4_0000_0000, length: 0x100 }),
+            ..work_with(&empty)
+        };
+        assert_eq!(crate::submission_read(&info, &naming), None);
+        let at_zero = Work {
+            commands: Some(guesthouse_backend::CommandBuffer { address: 0, length: 0 }),
+            ..work_with(&empty)
+        };
+        assert!(crate::submission_read(&info, &at_zero).is_some());
+    }
+
+    #[test]
     fn a_registry_lookup_left_to_the_core_has_no_line_and_another_query_left_to_it_has() {
         let info = crate::DeviceInfo::default();
         let lookup = query_of(AdapterQuery::REGISTRY, &[0x5A; 16], "dwm.exe");
@@ -1131,15 +1155,15 @@ mod tests {
     fn a_registry_value_the_backend_gives_is_named_and_one_it_has_not_is_left_to_the_core() {
         use guesthouse_messages::registry::TYPE_STRING;
         let vulkan = RegistryName::Value("vulkandrivername".into());
-        let given = crate::registry_answer(&vulkan);
-        let lines = lines::logged(|| assert_eq!(crate::registry_answer(&vulkan), given));
+        let given = crate::registry_answer(&vulkan, "card");
+        let lines = lines::logged(|| assert_eq!(crate::registry_answer(&vulkan, "card"), given));
         let bytes = given.expect("the backend has this value").bytes.len();
         let line = format!("amd registry name=\"vulkandrivername\" type={TYPE_STRING} bytes={bytes}");
         assert_eq!(lines, [(Level::Debug, line)]);
 
         let store = RegistryName::DriverStorePath;
-        let given = crate::registry_answer(&store);
-        let lines = lines::logged(|| assert_eq!(crate::registry_answer(&store), given));
+        let given = crate::registry_answer(&store, "card");
+        let lines = lines::logged(|| assert_eq!(crate::registry_answer(&store, "card"), given));
         let bytes = given.expect("the backend has this path").bytes.len();
         assert_eq!(
             lines,
@@ -1147,7 +1171,7 @@ mod tests {
         );
 
         let unknown = RegistryName::Value("opencldrivername".into());
-        let lines = lines::logged(|| assert_eq!(crate::registry_answer(&unknown), None));
+        let lines = lines::logged(|| assert_eq!(crate::registry_answer(&unknown, "card"), None));
         assert!(lines.is_empty(), "{lines:?}");
     }
 
