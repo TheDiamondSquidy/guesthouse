@@ -109,6 +109,14 @@ pub struct Recipe {
     pub settings: SettingsAsked,
     #[serde(default)]
     pub steps: Steps,
+    /// Starts the machine as lean Windows, which the user can still turn off before it is made.
+    /// Left out of a file, and of a machine's copy, when it is off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lean: bool,
+    /// Folders Defender's real-time scanning may leave out, such as a games library. The recipe only
+    /// names them: the person making the machine is the one who turns it on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scan_exclusions: Vec<String>,
 }
 
 /// A character that draws nothing, or moves what is drawn around it: a control, or one of the marks that
@@ -180,6 +188,15 @@ impl Recipe {
             return Err(Failure::new(
                 "vram_gib is for a Windows recipe: only Windows machines have the cap.",
             ));
+        }
+        if self.lean && self.guest != Guest::Windows {
+            return Err(Failure::new("lean is for a Windows recipe."));
+        }
+        if !self.scan_exclusions.is_empty() && self.guest != Guest::Windows {
+            return Err(Failure::new("scan_exclusions is for a Windows recipe."));
+        }
+        if let Some(problem) = crate::scan_exclusions::list_problem(&self.scan_exclusions) {
+            return Err(Failure(problem));
         }
         if self.steps.packages.len() > PACKAGES_MOST {
             return Err(Failure(format!("A recipe lists at most {PACKAGES_MOST} packages.")));

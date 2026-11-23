@@ -21,12 +21,14 @@ mod install;
 mod intel_device;
 mod intel_files;
 mod late_watch;
+mod lean;
 mod macos;
 mod macos_install;
 mod nvme_move;
 mod own_linux;
 mod recipe;
 mod remote_access;
+mod scan_exclusions;
 mod ubuntu;
 mod window_speed;
 
@@ -94,6 +96,10 @@ const FORCE_POLL: Duration = Duration::from_millis(200);
 pub(crate) const KEY_POLL: Duration = Duration::from_millis(500);
 /// Runs a machine's recipe again, as its settings ask.
 pub const RECIPE_TASK: &str = "recipe";
+/// Makes a lean machine lean again, as its settings ask.
+pub const LEAN_TASK: &str = "lean";
+/// Has Defender scan the folders a machine left out, as its settings ask.
+pub const SCAN_ALL_TASK: &str = "scan_all";
 
 /// The running side of a task: reports steps, and holds what the actions need.
 pub struct Task<'a> {
@@ -545,7 +551,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         "start" => {
             // Each start is a look at the library, as the app's is.
             crate::throwaway::delete_finished(task.context);
-            start(task)
+            start(task).map(|()| recipe::after_start(task))
         }
         "stop" => stop(task),
         "force" => force(task, first),
@@ -564,6 +570,8 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         }
         crate::remote_access::APPLY_TASK => remote_access::apply_change(task),
         RECIPE_TASK => recipe::run_again(task),
+        LEAN_TASK => lean::run_again(task),
+        SCAN_ALL_TASK => scan_exclusions::scan_all(task),
         "install" if task.machine.macos() => macos_install::install(task),
         "install" if task.machine.kind == Kind::Linux => ubuntu::install(task),
         "install" => install(task),
@@ -624,6 +632,11 @@ pub fn run_task(
     let _ = writeln!(std::io::stdout(), "{} {action} finished", clock_text());
     if result.is_ok() && task.watch_after_start {
         late_watch::watch_after_start(&mut task);
+    }
+    // Also once the start is reported done, and never part of it.
+    if result.is_ok() && action == "start" {
+        scan_exclusions::after_start(&mut task);
+        lean::after_start(&mut task);
     }
     result
 }

@@ -150,3 +150,32 @@ fn marks_that_hide_or_reverse_text_are_refused_where_a_person_reads_one_line() {
         assert!(refused(&GOOD.replace("Games", &format!("Ga{mark}mes"))).contains("one line"), "{mark}");
     }
 }
+
+#[test]
+fn lean_is_for_windows_and_a_recipe_without_it_is_kept_as_before() {
+    let lean =
+        Recipe::parse("name = \"S\"\ndescription = \"D.\"\nguest = \"windows\"\nlean = true\n").unwrap();
+    assert!(lean.lean);
+    assert!(serde_json::to_string(&lean).unwrap().contains("\"lean\":true"));
+    let usual = Recipe::parse("name = \"S\"\ndescription = \"D.\"\nguest = \"windows\"\n").unwrap();
+    assert!(!usual.lean);
+    assert!(!serde_json::to_string(&usual).unwrap().contains("lean"), "an older build still reads its copy");
+    let said =
+        Recipe::parse("name = \"S\"\ndescription = \"D.\"\nguest = \"ubuntu\"\nlean = true\n").unwrap_err();
+    assert!(said.0.contains("lean is for a Windows recipe"), "{}", said.0);
+}
+
+#[test]
+fn the_recipes_that_come_with_the_app_are_recipes() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../recipes");
+    let read = |name: &str| Recipe::parse(&std::fs::read_to_string(folder.join(name)).unwrap()).unwrap();
+    let games = read("windows-games.toml");
+    assert!(games.lean);
+    assert_eq!(games.scan_exclusions, [r"C:\Program Files (x86)\Steam\steamapps"]);
+    let clean = read("windows-clean-box.toml");
+    assert!(
+        !clean.lean && clean.scan_exclusions.is_empty(),
+        "the box for trying things is Windows as it ships"
+    );
+    read("ubuntu-cuda.toml");
+}

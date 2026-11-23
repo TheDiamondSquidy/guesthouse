@@ -12,6 +12,7 @@ mod gpu_choice;
 mod gpu_preview;
 mod hardware;
 mod jail;
+mod lean;
 mod linux_gpu;
 mod macos;
 mod network;
@@ -19,6 +20,7 @@ mod nvapi_wrapper;
 mod recipe;
 mod remote_access;
 mod remove;
+mod scan_exclusions;
 mod sharing;
 mod snapshots;
 mod starting;
@@ -190,6 +192,10 @@ struct Parts {
     remote_access: remote_access::RemoteAccess,
     /// Only a machine made for a recipe has one.
     recipe: Option<recipe::Recipe>,
+    /// Only a machine made lean has one.
+    lean: Option<lean::Lean>,
+    /// Only a machine that leaves folders out of Defender's scanning has one.
+    scan_exclusions: Option<scan_exclusions::ScanExclusions>,
     usb: usb::Usb,
     copies: copies::Copies,
     remove: remove::Remove,
@@ -226,6 +232,8 @@ impl SettingsDialog {
             // Built in the order they show: Remove stays last on its page.
             recipe: recipe::Recipe::new(&shared, &pages.general),
             copies: copies::Copies::new(&shared, &pages.general),
+            lean: lean::Lean::new(&shared, &pages.general),
+            scan_exclusions: scan_exclusions::ScanExclusions::new(&shared, &pages.general),
             remove: remove::Remove::new(&shared, &pages.general),
             display: display::Display::new(&shared, &pages.display),
             disk: disk::Disk::new(&shared, &pages.storage),
@@ -272,6 +280,12 @@ impl SettingsDialog {
         parts.sharing.set_status(status);
         parts.network.set_status(status);
         parts.remote_access.set_status(status);
+        if let Some(lean) = &parts.lean {
+            lean.set_status(status);
+        }
+        if let Some(skipped) = &parts.scan_exclusions {
+            skipped.set_status(status);
+        }
         if let Some(recipe) = &parts.recipe {
             recipe.set_status(status);
         }

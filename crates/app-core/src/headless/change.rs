@@ -358,6 +358,12 @@ pub(super) fn show(context: &Context, machine: &Machine, out: &mut dyn Write) ->
         for service in Service::ALL {
             line(out, service.key(), &access.get(service).map_or("not set", switch))?;
         }
+        let lean = switch(crate::lean::is_lean(context, machine));
+        match crate::lean::state_text(context, machine) {
+            Some(done) if lean == "on" => line(out, "lean", &format!("on. {done}"))?,
+            _ => line(out, "lean", &lean)?,
+        }
+        line(out, "defender", &crate::scan_exclusions::show_text(context, machine))?;
     }
     line(out, "start-unjailed", &switch(machine.start_without_jail))?;
     line(out, "throwaway", &switch(machine.throwaway))?;
