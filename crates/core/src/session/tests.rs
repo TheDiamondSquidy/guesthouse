@@ -2090,6 +2090,27 @@ mod queues {
     }
 
     #[test]
+    fn a_reply_can_go_before_the_doorbell_which_is_then_rung_in_order() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        let mut request = message(Command::SubmitToHardwareQueue, 0x50);
+        set_u32(&mut request, 0x18, queue);
+        set_u64(&mut request, 0x20, 1);
+        let mut out = Vec::new();
+        let answer = session.handle_message_reply_first(&request, Some(ReplyTicket::default()), &mut out);
+        assert_eq!((answer, out), (Answer::Now, SUCCESS.to_le_bytes().to_vec()));
+        assert!(session.backend().doorbells.is_empty(), "the reply goes first");
+        session.ring_after_reply();
+        assert_eq!(session.backend().doorbells, [(queue, 1)]);
+        // Nothing is left for later, and plain handling rings at once as before.
+        session.ring_after_reply();
+        submit(&mut session, queue, 2);
+        assert_eq!(session.backend().doorbells, [(queue, 1), (queue, 2)]);
+    }
+
+    #[test]
     fn a_backend_can_take_gpu_addresses_for_its_channels() {
         let mut session = session();
         session.backend_mut().run_work = true;
@@ -2763,6 +2784,60 @@ mod held_replies {
         submit(&mut session, queue, 1);
         let _ = send_with_ticket(&mut session, &copy(context, source, target));
         let _ = session.poll(Instant::now() + Duration::from_secs(1));
+        assert_eq!(session.backend().copies.len(), 1);
+    }
+
+    #[test]
+    fn a_blocking_copy_of_an_unfinished_frame_goes_to_a_card_that_holds_it() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().copies_after_work = true;
+        session.config.frame_wait = Duration::from_secs(60);
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        let (_, source, _, target) = surfaces(&mut session);
+        session.set_copy_order(crate::CopyOrder::Blocking);
+        submit(&mut session, queue, 1);
+        let started = Instant::now();
+        let (answer, reply) = send_with_ticket(&mut session, &copy(context, source, target));
+        assert_eq!(answer, Answer::Now);
+        assert_eq!(reply, Status::SUCCESS.0.to_le_bytes());
+        assert!(started.elapsed() < Duration::from_secs(10), "the message thread didn't wait for the frame");
+        assert_eq!(session.backend().copied_after, vec![vec![(fence, 1)]]);
+        assert_eq!(session.backend().copies.len(), 1);
+    }
+
+    #[test]
+    fn a_blocking_copy_of_a_finished_frame_is_copied_the_usual_way() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().copies_after_work = true;
+        session.config.frame_wait = Duration::from_secs(60);
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        let (_, source, _, target) = surfaces(&mut session);
+        session.set_copy_order(crate::CopyOrder::Blocking);
+        submit(&mut session, queue, 1);
+        session.memory_mut().write_u64(fence, 1).unwrap();
+        let _ = send_with_ticket(&mut session, &copy(context, source, target));
+        assert!(session.backend().copied_after.is_empty());
+        assert_eq!(session.backend().copies.len(), 1);
+    }
+
+    #[test]
+    fn a_blocking_copy_waits_for_its_frame_when_the_card_cant_hold_it() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.config.frame_wait = Duration::from_millis(20);
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        let (_, source, _, target) = surfaces(&mut session);
+        session.set_copy_order(crate::CopyOrder::Blocking);
+        submit(&mut session, queue, 1);
+        let started = Instant::now();
+        let (answer, _) = send_with_ticket(&mut session, &copy(context, source, target));
+        assert_eq!(answer, Answer::Now);
+        assert!(started.elapsed() >= Duration::from_millis(20), "it waited out the frame's time");
         assert_eq!(session.backend().copies.len(), 1);
     }
 
