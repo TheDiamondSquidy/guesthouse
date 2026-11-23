@@ -171,6 +171,22 @@ fn what_was_noted_is_kept_by_a_snapshot_and_a_snapshot_from_before_leaves_notes_
     assert!(!state_file(&context, &machine).exists());
 }
 
+#[test]
+fn going_back_to_before_a_recipes_steps_says_they_have_not_run() {
+    use crate::recipe::{Outcome, read_outcome, write_outcome};
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    let machine = windows(&context, &scratch);
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "go_back", machine.clone());
+    write_outcome(&context, &machine, &Outcome::Pending).unwrap();
+    take_snapshot(&mut task, "Before the steps").unwrap();
+    let tag = list_snapshots(&context, &machine)[0].tag.clone();
+    write_outcome(&context, &machine, &Outcome::Done).unwrap();
+    go_back(&mut task, &tag).unwrap();
+    assert_eq!(read_outcome(&context, &machine), Outcome::Pending, "the disk has nothing they installed");
+}
+
 fn read_identity_shown(context: &Context, machine: &Machine) -> bool {
     crate::gpu_identity::read_state(context, machine).shown == Shown::Maker
 }
@@ -193,6 +209,26 @@ fn the_switch_and_the_kind_of_machine_decide_whether_a_snapshot_is_taken() {
     let on = Machine { auto_snapshot: Some(true), ..machine };
     start(&context, &on, true);
     assert_eq!(names(&context, &on).len(), 1);
+}
+
+#[test]
+fn a_throwaway_takes_none_and_offers_no_way_back_as_each_start_is_clean() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    let machine = Machine { throwaway: true, ..windows(&context, &scratch) };
+    machine.save(&context).unwrap();
+    restart_due(&context, &machine);
+    let task = start(&context, &machine, false);
+    assert!(names(&context, &machine).is_empty(), "the clean disk gains no snapshot");
+    assert!(task.auto.covers.is_empty() && task.auto.note.is_empty());
+    let left = record::Record {
+        tag: "guesthouse-0a1b2c3d".into(),
+        name: "Before".into(),
+        pending: true,
+        covered: vec![],
+    };
+    record::write(&context, &machine, &left).unwrap();
+    assert_eq!(restore_point(&context, &machine), None, "a failed run is undone by the next start");
 }
 
 #[test]

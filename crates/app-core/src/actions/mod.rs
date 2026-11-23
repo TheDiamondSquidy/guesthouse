@@ -248,6 +248,7 @@ pub fn smaller_start_note(gib: u32, own: u32) -> String {
 fn boot(task: &mut Task) -> Result<()> {
     task.step("Starting the VM");
     let shown = start_gpu_vm(task)?;
+    crate::token_change::finish_token_change(task.context, &task.machine, task.context.agent_port(None));
     let ready = get_ready(task, shown);
     if ready.is_err() {
         turn_off_after_failed_start(task);
@@ -533,7 +534,11 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
     let first = arguments.first().map(String::as_str);
     let text = first.unwrap_or_default();
     match task.action.as_str() {
-        "start" => start(task),
+        "start" => {
+            // Each start is a look at the library, as the app's is.
+            crate::throwaway::delete_finished(task.context);
+            start(task)
+        }
         "stop" => stop(task),
         "force" => force(task, first),
         "grow" => grow(task, text.parse().map_err(|_| Failure::new("That is not a size."))?),
@@ -557,6 +562,12 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         "take_snapshot" => take_snapshot(task, text),
         "go_back" => go_back(task, text),
         "delete_snapshot" => delete_snapshot(task, text),
+        crate::export::EXPORT_TASK => crate::export::export(task, text),
+        crate::duplicate::DUPLICATE_TASK => {
+            let said = |word: &str| arguments.iter().skip(1).any(|given| given == word);
+            let throwaway = said(crate::duplicate::THROWAWAY_WORD);
+            crate::duplicate::duplicate(task, text, throwaway, said(crate::duplicate::DELETE_WORD))
+        }
         other => Err(Failure(format!("There is no action called {}.", shell_quote(other)))),
     }
 }
