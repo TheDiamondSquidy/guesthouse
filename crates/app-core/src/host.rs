@@ -36,10 +36,53 @@ pub const IO_AT_START_GIB: u64 = 1;
 /// the host can go there. On a 16 GiB PC every GiB kept here is one a program can't have open.
 pub const FREE_AT_START_GIB: u64 = 1;
 const KIB: u64 = 1024;
+/// The most CPUs Linux builds are made for, less one, so a typo like `0-99999999` is refused rather
+/// than counted out.
+const MOST_CPU_NUMBER: u32 = 8191;
 
 /// The numbers of `cpuN` folders.
 fn cpu_numbers(root: &Path) -> Vec<u32> {
     sorted_names(root).iter().filter_map(|name| name.strip_prefix("cpu")?.parse().ok()).collect()
+}
+
+/// Every CPU the kernel lists, offline ones too, in order.
+pub fn cpus_present(root: &Path) -> Vec<u32> {
+    cpu_numbers(root)
+}
+
+/// Reads CPUs the way taskset takes them: `0-7,16-23`, or just `3`. Spaces are fine. The CPUs come
+/// back sorted and each once, so `4,0-2,2` is `0,1,2,4`. Empty text is no CPUs, which is not an error.
+pub fn parse_cpu_list(text: &str) -> std::result::Result<Vec<u32>, String> {
+    let mut cpus = BTreeSet::new();
+    for part in text.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+        let number = |digits: &str| {
+            digits.trim().parse::<u32>().map_err(|_| format!("\"{part}\" is not a CPU or a range like 0-7."))
+        };
+        match part.split_once('-') {
+            Some((first, last)) => {
+                let (first, last) = (number(first)?, number(last)?);
+                if first > last {
+                    return Err(format!("\"{part}\" runs backwards. Write it as {last}-{first}."));
+                }
+                if last > MOST_CPU_NUMBER {
+                    return Err(format!(
+                        "\"{part}\" is past the highest CPU number Linux gives, {MOST_CPU_NUMBER}."
+                    ));
+                }
+                cpus.extend(first..=last);
+            }
+            None => {
+                let cpu = number(part)?;
+                if cpu > MOST_CPU_NUMBER {
+                    return Err(format!(
+                        "\"{part}\" is past the highest CPU number Linux gives, {MOST_CPU_NUMBER}."
+                    ));
+                }
+                cpus.insert(cpu);
+            }
+        }
+    }
+    Ok(cpus.into_iter().collect())
 }
 
 /// The CPUs with the larger L3, or nothing if they all have the same.
@@ -332,6 +375,17 @@ mod tests {
         assert_eq!(vcache_cpus(&root), expected);
         assert_eq!(cpu_list(&vcache_cpus(&root)), "0-7,16-23");
         assert_eq!(physical_cores(&root), 16);
+    }
+
+    #[test]
+    fn cpu_lists_are_read_as_taskset_reads_them() {
+        assert_eq!(parse_cpu_list("0-7,16-23").unwrap(), (0..8).chain(16..24).collect::<Vec<u32>>());
+        assert_eq!(parse_cpu_list(" 4, 0-2 ,2 ").unwrap(), vec![0, 1, 2, 4]);
+        assert_eq!(parse_cpu_list("").unwrap(), Vec::<u32>::new());
+        assert_eq!(cpu_list(&parse_cpu_list("0-15").unwrap()), "0-15");
+        for bad in ["a", "1-", "-3", "5-2", "1,,x", "0-99999999", "9999"] {
+            assert!(parse_cpu_list(bad).is_err(), "{bad} should be refused");
+        }
     }
 
     #[test]

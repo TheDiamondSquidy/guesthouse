@@ -4,7 +4,7 @@
 use super::{Shared, is_off};
 use crate::rows::{explain, number_row};
 use adw::prelude::*;
-use guesthouse_app_core::host::{cpu_list, physical_cores, vcache_cpus};
+use guesthouse_app_core::host::{cpu_list, cpus_present, parse_cpu_list, physical_cores, vcache_cpus};
 use guesthouse_app_core::limits::{cores_range, ram_field};
 use guesthouse_app_core::machine::Kind;
 use guesthouse_app_core::settings::max_vram_gib_for;
@@ -28,6 +28,7 @@ pub struct Hardware {
     vram: adw::SpinRow,
     pin: adw::SwitchRow,
     pin_possible: bool,
+    chosen: adw::EntryRow,
     sound: adw::SwitchRow,
 }
 
@@ -74,6 +75,18 @@ impl Hardware {
         });
         explain(&pin, PIN_NOTE);
         advanced.add(&pin);
+        let chosen = adw::EntryRow::builder()
+            .title("Choose CPUs, like 0-7,16-23 (empty for any)")
+            .text(machine.pin_cpus.as_str())
+            .show_apply_button(true)
+            .build();
+        chosen.set_tooltip_text(Some(&format!(
+            "The CPUs this PC lists are {}. The VM only runs on the ones you choose, and they replace \
+             V-Cache pinning. Choose at least as many as the machine has cores. `lscpu --extended` in a \
+             terminal shows which CPUs share a core.",
+            cpu_list(&cpus_present(&context.cpus))
+        )));
+        advanced.add(&chosen);
         let vram =
             number_row(VRAM_TITLE, machine.vram_gib.into(), 0.0, max_vram_gib_for(&context, &machine).into());
         vram.set_subtitle("In GiB, 0 for none");
@@ -99,6 +112,7 @@ impl Hardware {
             vram,
             pin,
             pin_possible: !cpus.is_empty(),
+            chosen,
             sound,
         };
         this.connect(shared);
@@ -126,6 +140,32 @@ impl Hardware {
             saving.machine.borrow_mut().vcache_pin = row.is_active();
             saving.save();
         });
+        self.chosen.connect_changed(|row| {
+            row.remove_css_class("error");
+            row.set_tooltip_text(None);
+        });
+        let saving = shared.clone();
+        self.chosen.connect_apply(move |row| {
+            let present = cpus_present(&saving.window.context().cpus);
+            let problem = match parse_cpu_list(&row.text()) {
+                Err(why) => Some(why),
+                Ok(cpus) => {
+                    let missing: Vec<u32> =
+                        cpus.iter().copied().filter(|cpu| !present.contains(cpu)).collect();
+                    (!missing.is_empty()).then(|| format!("This PC has no CPU {}.", cpu_list(&missing)))
+                }
+            };
+            if let Some(problem) = problem {
+                row.add_css_class("error");
+                row.set_tooltip_text(Some(&problem));
+                return;
+            }
+            // Saved the way taskset takes it, so `4,0-2` reads back as `0-2,4`.
+            let text = cpu_list(&parse_cpu_list(&row.text()).unwrap_or_default());
+            row.set_text(&text);
+            saving.machine.borrow_mut().pin_cpus = text;
+            saving.save();
+        });
         let saving = shared.clone();
         self.sound.connect_active_notify(move |row| {
             saving.machine.borrow_mut().sound = row.is_active();
@@ -139,6 +179,7 @@ impl Hardware {
         self.ram.set_sensitive(off);
         self.vram.set_sensitive(off);
         self.pin.set_sensitive(off && self.pin_possible);
+        self.chosen.set_sensitive(off);
         self.sound.set_sensitive(off);
         self.group.set_description((!off).then_some(VM_MUST_BE_OFF));
         self.advanced.set_description((!off).then_some(VM_MUST_BE_OFF));

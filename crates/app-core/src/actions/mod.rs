@@ -62,7 +62,7 @@ use crate::failure::{Failure, Result};
 use crate::gpu_identity::{PciIdentity, read_state};
 use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::is_no_room;
-use crate::host::{GIB, cpu_list, fits_now, ram_limit_for, smaller_start, vcache_cpus};
+use crate::host::{GIB, cpu_list, fits_now, parse_cpu_list, ram_limit_for, smaller_start, vcache_cpus};
 use crate::kept_logs;
 use crate::library::MAX_DISK_GIB;
 use crate::log::{clock_text, write_log};
@@ -195,8 +195,12 @@ pub fn plan_for(context: &Context, machine: &Machine, boot: Boot) -> VmPlan {
     let mates = card_mates(machine, &other_machines(context), &setup_card(context));
     let cap = video_cap(machine, &mates, max_vram_gib_for(context, machine));
     let mut plan = VmPlan::new(context, machine, boot, context.slot, cap);
-    if machine.vcache_pin {
-        plan.pin = Some(cpu_list(&vcache_cpus(&context.cpus)));
+    // CPUs the user chose win over V-Cache pinning. An unreadable list never gets here: the start
+    // checks refuse it first.
+    match parse_cpu_list(&machine.pin_cpus) {
+        Ok(chosen) if !chosen.is_empty() => plan.pin = Some(cpu_list(&chosen)),
+        _ if machine.vcache_pin => plan.pin = Some(cpu_list(&vcache_cpus(&context.cpus))),
+        _ => {}
     }
     plan
 }
