@@ -9,15 +9,16 @@ mod drives;
 mod forwarding_jail;
 mod macos;
 mod nic;
-pub use nic::passt_probe_words;
 mod own_linux;
+mod passt_age;
 mod qemu_jail;
 mod standalone;
 mod ubuntu;
 
 pub use amd::{AmdBoot, RENDER_SERVER};
 pub use macos::{MacosBoot, MacosCard, UDMABUF};
-pub use nic::PASST_PID_FILE;
+pub use nic::{PASST_PID_FILE, only_through_probe_words, passt_probe_words};
+pub use passt_age::PasstAge;
 pub use qemu_jail::{PASST_FD, PID_FILE, TAP_FD};
 pub use standalone::memory_files_in;
 pub use ubuntu::{FORWARDED_INPUT_SOCKET, FRAMES_PREFIX, INSTALL_LOG, ssh_port};
@@ -101,11 +102,14 @@ pub struct NetworkPlan {
     pub mac: String,
     pub forwards: Vec<Forward>,
     /// The DNS server passt passes the guest's names on to: the host's, or while the guest goes out
-    /// through one interface, one that works there.
+    /// through one interface, one that works there. For a passt too old for that, one off the PC that
+    /// the guest asks itself.
     pub resolver: Option<String>,
     /// NAT only: the one interface all of the guest's traffic goes through. It takes passt, whatever
     /// `passt` says, and passt must be started by the jail's launcher, which guards its connections.
     pub only_through: Option<OnlyThrough>,
+    /// Which of the app's words this PC's passt takes.
+    pub passt_age: PasstAge,
 }
 
 /// Everything QEMU's arguments are built from.
@@ -198,8 +202,14 @@ impl VmPlan {
         // Held to one interface, a machine never falls back to QEMU's own NAT, which has no such
         // thing. If passt isn't there, the start is refused: see `network_start_problems`.
         let passt = nat && (only_through.is_some() || (machine.passt && passt_installed()));
+        // Held to one interface, passt must be the newest, or the start is refused.
+        let passt_age = match &only_through {
+            None if passt => passt_age_now().unwrap_or_default(),
+            _ => PasstAge::default(),
+        };
         let resolver = match &only_through {
             Some(through) => dns_now(&machine.dns, &through.interface),
+            None if passt && passt_age == PasstAge::NoDnsHost => passt_age::outside_resolver_now(),
             None if passt => host_resolver(),
             None => None,
         };
@@ -236,6 +246,7 @@ impl VmPlan {
                 forwards: machine.forwards.clone(),
                 resolver,
                 only_through,
+                passt_age,
             },
             tools_disc: tools.is_file().then_some(tools),
             sound: None,
@@ -286,6 +297,22 @@ fn is_program(path: &Path) -> bool {
 
 pub fn passt_installed() -> bool {
     on_path("passt")
+}
+
+/// Which of the app's words this PC's passt takes, or `None` if it takes none or isn't there.
+pub fn passt_age_now() -> Option<PasstAge> {
+    passt_age::age_now(passt_probe_words)
+}
+
+/// Why a machine on passt can't start on this PC's passt, if it can't. passt missing isn't one: the
+/// machine then uses QEMU's own NAT.
+pub fn passt_start_problem() -> Option<String> {
+    if !passt_installed() {
+        return None;
+    }
+    let age = passt_age_now();
+    let outside = (age == Some(PasstAge::NoDnsHost)).then(passt_age::outside_resolver_now).flatten();
+    passt_age::start_problem(age, outside.as_deref())
 }
 
 fn host_resolver() -> Option<String> {

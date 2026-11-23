@@ -178,9 +178,14 @@ pub fn network_start_problems(context: &Context, machine: &Machine, others: &[Ma
     found.extend(only_through_problems(
         machine,
         passt_installed(),
-        || only_through::passt_too_old_now(&crate::vm_args::passt_probe_words()),
+        || only_through::passt_too_old_now(&crate::vm_args::only_through_probe_words()),
         |interface| only_through::dns_now(&machine.dns, interface),
     ));
+    // A machine held to one interface needs the newest passt, which the check above asks for.
+    let held = machine.kind != Kind::Linux && !machine.only_through.trim().is_empty();
+    if machine.network_mode == Mode::Nat && machine.passt && !held {
+        found.extend(crate::vm_args::passt_start_problem());
+    }
     for item in &machine.forwards {
         let taken = || {
             let host = u16::try_from(item.host).ok()?;
