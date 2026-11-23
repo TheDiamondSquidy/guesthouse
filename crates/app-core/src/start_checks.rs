@@ -183,7 +183,24 @@ pub fn start_problems(context: &Context, machine: &Machine) -> Result<Vec<String
     if u64::from(machine.ram_gib) > limit {
         found.push(format!("This PC can give a machine {limit} GiB at most right now."));
     }
-    if machine.vcache_pin {
+    let chosen = host::parse_cpu_list(&machine.pin_cpus).unwrap_or_default();
+    if !chosen.is_empty() {
+        let present = host::cpus_present(&context.cpus);
+        let missing: Vec<u32> = chosen.iter().copied().filter(|cpu| !present.contains(cpu)).collect();
+        if !missing.is_empty() {
+            found.push(format!(
+                "This PC has no CPU {}. Choose from {}.",
+                host::cpu_list(&missing),
+                host::cpu_list(&present)
+            ));
+        } else if machine.cores as usize > chosen.len() {
+            found.push(format!(
+                "{} CPUs are chosen for the machine, too few for {} cores.",
+                chosen.len(),
+                machine.cores
+            ));
+        }
+    } else if machine.vcache_pin {
         let cpus = host::vcache_cpus(&context.cpus);
         if cpus.is_empty() {
             found.push("This CPU has no V-Cache cores to pin to.".to_owned());
@@ -379,6 +396,30 @@ mod tests {
         let (context, machine) = startable(&scratch);
         let found = start_problems(&context, &Machine { vcache_pin: true, ..machine }).unwrap();
         assert!(says(&found, "no V-Cache"));
+    }
+
+    #[test]
+    fn chosen_cpus_must_exist_and_be_enough() {
+        let scratch = Scratch::new();
+        let (context, machine) = startable(&scratch);
+        let problems = |cpus: &str| {
+            start_problems(&context, &Machine { pin_cpus: cpus.to_owned(), ..machine.clone() }).unwrap()
+        };
+        assert!(problems("").is_empty() && problems("0-7").is_empty() && problems("8-15").is_empty());
+        assert!(says(&problems("0-3"), "too few for 8 cores"));
+        assert!(says(&problems("0-6,40"), "no CPU 40"));
+        // A list that can't be read is the machine's own problem, named before any start.
+        let broken = Machine { pin_cpus: "5-2".to_owned(), ..machine.clone() };
+        assert!(says(&broken.problems(0), "runs backwards"));
+    }
+
+    #[test]
+    fn chosen_cpus_take_the_place_of_vcache_pinning() {
+        let scratch = Scratch::new();
+        let (context, machine) = startable(&scratch);
+        // The fixture has no V-Cache cores, which alone would refuse the start.
+        let both = Machine { vcache_pin: true, pin_cpus: "0-7".to_owned(), ..machine };
+        assert!(!says(&start_problems(&context, &both).unwrap(), "V-Cache"));
     }
 
     #[test]

@@ -273,6 +273,11 @@ pub struct Machine {
     /// reims-vgpu's device. Left out of the file when empty, so an older build can still read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub opencore: String,
+    /// The host CPUs the VM is kept on, as taskset takes them: `0-7,16-23`. Empty lets it run on any.
+    /// When set it is used instead of `vcache_pin`. Left out of the file when empty, so an older build
+    /// can still read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pin_cpus: String,
 }
 
 impl Machine {
@@ -324,6 +329,7 @@ impl Machine {
             disk_folder: String::new(),
             nvme: false,
             opencore: String::new(),
+            pin_cpus: String::new(),
         }
     }
 
@@ -521,6 +527,9 @@ impl Machine {
         found.extend(self.drive_problems());
         if self.vram_gib > max_vram_gib {
             found.push(format!("The video memory cap must be a whole number up to {max_vram_gib} GiB."));
+        }
+        if let Err(why) = crate::host::parse_cpu_list(&self.pin_cpus) {
+            found.push(format!("The CPUs for the machine: {why}"));
         }
         found
     }
