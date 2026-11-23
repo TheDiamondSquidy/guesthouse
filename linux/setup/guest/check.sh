@@ -82,6 +82,18 @@ check_own_desktop() {
     if [ -n "$on_gpu" ]; then pass 'the compositor runs on the GPU'; else fail 'the compositor runs on the GPU'; fi
 }
 
+# apt has to know the host's driver is there, or a package that needs it brings the distro's own.
+check_driver_package() {
+    local others
+    command -v dpkg-query > /dev/null || return 0
+    others=$(distro_driver_packages)
+    if [ -n "$others" ]; then
+        warn "the distro's own NVIDIA libraries are installed beside the host's ($others): programs get the host's while the GPU is on, but OpenCL goes through their ICD, and it and the services they brought are of another version. sudo $installed/driver-package.sh --replace puts the host's in their place"
+    else
+        check "dpkg counts the host's driver $1 as installed" test "$(installed_version "$driver_package")" = "$1"
+    fi
+}
+
 check_version() {
     local version=$1 module answer
     for module in $modules; do
@@ -91,6 +103,7 @@ check_version() {
     answer=$("$here/driver-version.py" 2>&1)
     check "the host's driver says $version (it said: $answer)" test "$answer" = "$version"
     check "libcuda $version linked in" sh -c "ldconfig -p | grep -q libcuda.so.1 && test -e $driver/lib/libcuda.so.$version"
+    check_driver_package "$version"
     check 'driver libraries resolve' sh -c "! ldd $driver/lib/libGLX_nvidia.so.0 $driver/lib/libnvidia-egl-wayland.so.1 $driver/lib/libnvidia-egl-gbm.so.1 2>&1 | grep -qE 'not found|GLIBC'"
 }
 

@@ -39,6 +39,20 @@ After the app updates, the guest takes the new scripts and settings by itself. E
 
 That's where the image is mounted on a boot with the GPU. On one without, mount it there first with `sudo mount -o ro LABEL=NVFWD_DRIVER /opt/nv/driver`.
 
+### The CUDA toolkit and other packages that need the driver
+
+The guest's NVIDIA libraries are the host's, from the image, and Ubuntu doesn't know they're there. So `apt install nvidia-cuda-toolkit` used to bring Ubuntu's own driver libraries with it, `libnvidia-compute-595` on 26.04, of another version than the host's: a second libcuda and NVML in `/usr/lib/x86_64-linux-gnu`, an OpenCL ICD, and from `nvidia-kernel-common` udev rules that load NVIDIA's modules, `nvidia-powerd` and sleep hooks. On an RTX 5090 with the host on 620.73.04, the GPU kept working with them: `nvidia-smi`, `nvfwd-check` and CUDA programs ran, and loaded the host's libcuda, NVML and PTX compiler, as the image's folder comes first. What they added was clutter of another version: OpenCL went to Ubuntu's 595 library through its ICD and found no platform, and `nvidia-powerd` started at each boot and stopped with `Allocate Root client failed 0x26`.
+
+A program built with that toolkit's runtime (`cudart` 12.4), which is what plain `nvcc` makes, runs in the guest. As it starts, the runtime asks the driver three things the driver API never does, and until the device let them through every such program stopped at its first CUDA call with `initialization error`. Two of the three have no public layout, so the device sends the host its own copy of the one question NVIDIA's library asks, never the guest's bytes. On the RTX 5090 with the host on 620.73.04, runtime programs, managed memory and two programs at once all ran with every value right. `nvfwd-check` runs a runtime check when a toolkit is there.
+
+OpenCL isn't in the driver image: the guest has no NVIDIA OpenCL library and no ICD for it, so OpenCL finds no platform.
+
+Now each boot with an image tells dpkg the host's driver is installed: `driver-package.sh` installs `nvfwd-host-driver`, a package with no files at the host's version, which provides `libcuda.so.1` and `libnvidia-ml.so.1` at that version, and `nvidia-opencl-icd`. That is what Ubuntu's CUDA packages ask for, so apt installs the toolkit and nothing of the driver. It's made again when the host's driver changes, and kept on a boot without the GPU. It only provides names: installing Ubuntu's driver on purpose still works, and apt takes `nvfwd-host-driver` away to do it. A guest that already has Ubuntu's libraries keeps them, and `nvfwd-check` names them with a warning. On a boot with the GPU, this puts the host's in their place in one go, and the toolkit and whatever else needed them stay:
+
+    sudo /usr/lib/nvfwd/driver-package.sh --replace
+
+apt says what it will remove, Ubuntu's libraries and the kernel-common and firmware packages that came with them, and asks first. A guest that has never booted with an image has no `nvfwd-host-driver` yet, and apt there still brings Ubuntu's driver. Tried on that RTX 5090: a fresh guest and an updated one got the package at boot through the image, the toolkit came with no driver package, the PTX kernel ran on the card and a restart was clean, and `--replace` cleared Ubuntu's driver from a guest that had it.
+
 ## A Linux you installed yourself
 
 Any ISO the app doesn't install by itself makes a plain machine, which you install by hand in the viewer. If it's a Linux, its settings have a Linux GPU switch. With it on, the machine starts with the same device, driver image and jail as Ubuntu's, on its own firmware and disk, and with the GPU off it boots as it always did.
