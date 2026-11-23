@@ -5,6 +5,7 @@ mod amd_files;
 mod amd_package;
 mod amd_start;
 mod api_stage;
+pub(crate) mod copy_identity;
 mod desktop;
 mod diagnose;
 mod display;
@@ -108,6 +109,9 @@ pub struct Task<'a> {
     watch_after_start: bool,
     /// What a start's snapshot before it has to finish, and tell.
     pub(crate) auto: AutoStart,
+    /// Every step said, in order, as the log has them.
+    #[cfg(test)]
+    pub(crate) said: std::sync::Mutex<Vec<String>>,
 }
 
 impl<'a> Task<'a> {
@@ -121,6 +125,8 @@ impl<'a> Task<'a> {
             ram_this_run: None,
             watch_after_start: false,
             auto: AutoStart::default(),
+            #[cfg(test)]
+            said: std::sync::Mutex::default(),
         }
     }
 
@@ -143,6 +149,8 @@ impl<'a> Task<'a> {
 
     pub fn step(&self, text: &str) {
         println!("{} {} {text}", clock_text(), self.action);
+        #[cfg(test)]
+        self.said.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(text.to_owned());
         // A step that can't be written costs the user a line of progress, and the task goes on.
         let _ = write_task(self.context, None, &self.record(std::process::id(), text));
     }
