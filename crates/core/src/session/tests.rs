@@ -496,10 +496,9 @@ mod adapter {
         let mut session = session();
         allocate(&mut session, private(0x20000));
         let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
-        // The test card is 8 GiB, and a card under 16 GiB keeps nothing for the host.
-        assert_eq!(u64_at(&reply, 0), Ok(8 << 30));
+        assert_eq!(u64_at(&reply, 0), Ok(6 << 30));
         assert_eq!(u64_at(&reply, 8), Ok(0x20000));
-        assert_eq!(u64_at(&reply, 24), Ok(4 << 30), "half the budget");
+        assert_eq!(u64_at(&reply, 24), Ok(3 << 30));
     }
 
     #[test]
@@ -517,7 +516,7 @@ mod adapter {
         let mut session = session();
         session.backend_mut().card_free = Some(100 << 30);
         let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
-        assert_eq!(u64_at(&reply, 0), Ok(8 << 30));
+        assert_eq!(u64_at(&reply, 0), Ok(6 << 30));
     }
 
     fn reserve(session: &mut TestSession, group: u32, bytes: u64) -> u32 {

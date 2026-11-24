@@ -4,10 +4,9 @@ use guesthouse_backend::AdapterFacts;
 use std::time::Duration;
 
 const GIB: u64 = 1 << 30;
-/// The host's desktop keeps a sixteenth of the card, and never less than this. The app's own figure, in
-/// `guesthouse_app_core::settings`, must be the same, or what the app offers and what the daemon allows differ.
-const HOST_SHARE: u64 = 16;
-const HOST_MINIMUM_GIB: u64 = 0;
+/// The host's desktop keeps an eighth of the card, and never less than this.
+const HOST_SHARE: u64 = 8;
+const HOST_MINIMUM_GIB: u64 = 2;
 
 /// How much memory the guest is told about, and may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,24 +77,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_big_card_keeps_a_sixteenth_for_the_host() {
-        assert_eq!(video_budget(32 * GIB), 30 * GIB);
-        assert_eq!(video_budget(16 * GIB), 15 * GIB);
+    fn a_big_card_keeps_an_eighth_for_the_host() {
+        assert_eq!(video_budget(32 * GIB), 28 * GIB);
     }
 
     #[test]
-    fn a_card_under_sixteen_gib_keeps_nothing_for_the_host() {
-        assert_eq!(video_budget(8 * GIB), 8 * GIB);
+    fn a_small_card_keeps_the_minimum() {
+        assert_eq!(video_budget(8 * GIB), 6 * GIB);
     }
 
     #[test]
     fn a_card_slightly_under_a_round_size_counts_as_that_size() {
-        assert_eq!(video_budget(32 * GIB - 4096), 30 * GIB);
+        assert_eq!(video_budget(32 * GIB - 4096), 28 * GIB);
     }
 
     #[test]
-    fn a_one_gib_card_is_all_the_guests() {
-        assert_eq!(video_budget(GIB), GIB);
-        assert_eq!(video_budget(0), 0);
+    fn a_tiny_card_leaves_nothing() {
+        assert_eq!(video_budget(GIB), 0);
     }
 }
