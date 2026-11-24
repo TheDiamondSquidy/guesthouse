@@ -123,7 +123,7 @@ fn answer<W: Work>(service: &Arc<Service<W>>, pipe: File) {
         Ok(Some(request)) => match allowed(&pipe) {
             Ok(()) => service.answer(request, &mut connection),
             Err(reason) => {
-                log(&reason);
+                log(&format!("refused: {reason}"));
                 let _ = connection.send(&Answer::Refused { reason });
             }
         },
@@ -380,6 +380,9 @@ mod tests {
         }
         fn disks(&self) -> &dyn guesthouse_host_windows::snapshots::Disks {
             &guesthouse_host_windows::windows::RealDisks
+        }
+        fn report_parts(&self) -> Vec<(String, Result<String, String>)> {
+            Vec::new()
         }
     }
 
