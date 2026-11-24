@@ -73,6 +73,7 @@ pub mod tasks;
 #[doc(hidden)]
 pub mod testing;
 pub mod text;
+pub mod thread_pins;
 pub mod updates;
 pub mod usb;
 pub mod vm_args;

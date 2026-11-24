@@ -24,6 +24,9 @@ pub struct Hardware {
     pin: adw::SwitchRow,
     pin_possible: bool,
     chosen: adw::EntryRow,
+    each_vcpu: adw::SwitchRow,
+    emulator: adw::EntryRow,
+    tuning: adw::SwitchRow,
     sound: adw::SwitchRow,
 }
 
@@ -105,6 +108,35 @@ impl Hardware {
             cpu_list(&cpus_present(&context.cpus))
         )));
         group.add(&chosen);
+        let each_vcpu = adw::SwitchRow::builder()
+            .title("Pin each vCPU")
+            .subtitle(
+                "Gives every virtual CPU a host CPU of its own, a core's two threads to neighbouring vCPUs, \
+                 instead of letting the host move them about. Needs CPUs chosen above, or V-Cache pinning.",
+            )
+            .active(machine.pin_vcpus)
+            .build();
+        group.add(&each_vcpu);
+        let emulator = adw::EntryRow::builder()
+            .title("Emulator CPUs, like 16-19 (empty for the CPUs above)")
+            .text(machine.emulator_cpus.as_str())
+            .show_apply_button(true)
+            .build();
+        emulator.set_tooltip_text(Some(
+            "Where QEMU's own threads (disk, network, sound) run when each vCPU is pinned. Pick CPUs outside \
+             the ones above, such as spare E-cores, so they never compete with a vCPU.",
+        ));
+        group.add(&emulator);
+        let tuning = adw::SwitchRow::builder()
+            .title("Match the host CPU")
+            .subtitle(
+                "Gives Windows a steady, invariant timestamp counter and the host's real cache sizes. Can \
+                 make games smoother. Windows machines only.",
+            )
+            .active(machine.cpu_tuning)
+            .visible(machine.kind == Kind::Windows)
+            .build();
+        group.add(&tuning);
         // Only a GPU machine has ever had sound, and a macOS guest counts as one.
         let sound = adw::SwitchRow::builder()
             .title("Sound")
@@ -114,7 +146,7 @@ impl Hardware {
             .build();
         group.add(&sound);
         let this =
-            Self { group, cores, ram, vram, whole_card, pin, pin_possible: !cpus.is_empty(), chosen, sound };
+            Self { group, cores, ram, vram, whole_card, pin, pin_possible: !cpus.is_empty(), chosen, each_vcpu, emulator, tuning, sound };
         this.connect(shared);
         this
     }
@@ -184,6 +216,48 @@ impl Hardware {
             saving.save();
         });
         let saving = shared.clone();
+        self.each_vcpu.connect_active_notify(move |row| {
+            saving.machine.borrow_mut().pin_vcpus = row.is_active();
+            saving.save();
+        });
+        let saving = shared.clone();
+        self.tuning.connect_active_notify(move |row| {
+            saving.machine.borrow_mut().cpu_tuning = row.is_active();
+            saving.save();
+        });
+        self.emulator.connect_changed(|row| {
+            row.remove_css_class("error");
+            row.set_tooltip_text(None);
+        });
+        let saving = shared.clone();
+        self.emulator.connect_apply(move |row| {
+            let present = cpus_present(&saving.window.context().cpus);
+            let chosen = match parse_cpu_list(&row.text()) {
+                Err(why) => Err(why),
+                Ok(cpus) => {
+                    let missing: Vec<u32> =
+                        cpus.iter().copied().filter(|cpu| !present.contains(cpu)).collect();
+                    if missing.is_empty() {
+                        Ok(cpus)
+                    } else {
+                        Err(format!("This PC has no CPU {}.", cpu_list(&missing)))
+                    }
+                }
+            };
+            match chosen {
+                Err(problem) => {
+                    row.add_css_class("error");
+                    row.set_tooltip_text(Some(&problem));
+                }
+                Ok(cpus) => {
+                    let text = cpu_list(&cpus);
+                    row.set_text(&text);
+                    saving.machine.borrow_mut().emulator_cpus = text;
+                    saving.save();
+                }
+            }
+        });
+        let saving = shared.clone();
         self.sound.connect_active_notify(move |row| {
             saving.machine.borrow_mut().sound = row.is_active();
             saving.save();
@@ -198,6 +272,9 @@ impl Hardware {
         self.whole_card.set_sensitive(off);
         self.pin.set_sensitive(off && self.pin_possible);
         self.chosen.set_sensitive(off);
+        self.each_vcpu.set_sensitive(off);
+        self.emulator.set_sensitive(off);
+        self.tuning.set_sensitive(off);
         self.sound.set_sensitive(off);
         self.group.set_description((!off).then_some(VM_MUST_BE_OFF));
     }

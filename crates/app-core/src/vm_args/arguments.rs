@@ -14,6 +14,9 @@ const HYPERV_FEATURES: &str = "hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpinde
 /// With Secure Boot and a TPM Windows would turn on memory integrity if it could, and that puts its
 /// own hypervisor under the guest, between GPU-PV and QEMU. It needs these CPU features.
 const NO_NESTED_VIRTUALIZATION: &str = ",-svm,-vmx";
+/// What a libvirt domain with `migratable="off"`, `invtsc` required and `cache mode="passthrough"` asks of
+/// QEMU. Windows then has a TSC that keeps counting through every state and the host's real cache sizes.
+const CPU_TUNING: &str = "migratable=off,+invtsc,host-cache-info=on,";
 /// The instance our virtual GPU has on the bus.
 const VGPU_INSTANCE: &str = "7a1e2f30-4c55-4d6e-9f10-0123456789ab";
 /// The guest's graphics kernel looks for this fixed instance on the global channel.
@@ -83,7 +86,7 @@ impl VmPlan {
             "-machine",
             "q35,accel=kvm,smm=on",
             "-cpu",
-            &format!("host,{hyperv}"),
+            &format!("host,{}{hyperv}", if self.cpu_tuning { CPU_TUNING } else { "" }),
             "-smp",
             &self.smp,
             "-m",

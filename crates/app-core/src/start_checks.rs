@@ -214,6 +214,17 @@ pub fn start_problems(context: &Context, machine: &Machine) -> Result<Vec<String
             ));
         }
     }
+    if machine.pin_vcpus && chosen.is_empty() && !machine.vcache_pin {
+        found.push("Pinning each vCPU needs CPUs chosen for the machine, or V-Cache pinning.".to_owned());
+    }
+    let emulator = host::parse_cpu_list(&machine.emulator_cpus).unwrap_or_default();
+    if machine.pin_vcpus && !emulator.is_empty() {
+        let present = host::cpus_present(&context.cpus);
+        let missing: Vec<u32> = emulator.iter().copied().filter(|cpu| !present.contains(cpu)).collect();
+        if !missing.is_empty() {
+            found.push(format!("This PC has no CPU {} for the emulator.", host::cpu_list(&missing)));
+        }
+    }
     let others = other_machines(context);
     if others.iter().any(|other| other.disk == machine.disk) {
         found.push(ALREADY_RUNNING.to_owned());
@@ -422,6 +433,22 @@ mod tests {
         // A list that can't be read is the machine's own problem, named before any start.
         let broken = Machine { pin_cpus: "5-2".to_owned(), ..machine.clone() };
         assert!(says(&broken.problems(0), "runs backwards"));
+    }
+
+    #[test]
+    fn pinning_each_vcpu_needs_cpus_and_real_emulator_cpus() {
+        let scratch = Scratch::new();
+        let (context, machine) = startable(&scratch);
+        let problems = |changes: Machine| start_problems(&context, &changes).unwrap();
+        let pinned = Machine { pin_vcpus: true, pin_cpus: "0-7".to_owned(), ..machine.clone() };
+        assert!(problems(pinned.clone()).is_empty());
+        assert!(says(&problems(Machine { pin_cpus: String::new(), ..pinned.clone() }), "needs CPUs chosen"));
+        assert!(problems(Machine { pin_vcpus: false, pin_cpus: String::new(), ..pinned.clone() }).is_empty());
+        let on = |cpus: &str| problems(Machine { emulator_cpus: cpus.to_owned(), ..pinned.clone() });
+        assert!(on("8-9").is_empty());
+        assert!(says(&on("8,40"), "no CPU 40 for the emulator"));
+        let unused = Machine { pin_vcpus: false, emulator_cpus: "40".to_owned(), ..pinned };
+        assert!(problems(unused).is_empty(), "it only matters when pinning each vCPU");
     }
 
     #[test]

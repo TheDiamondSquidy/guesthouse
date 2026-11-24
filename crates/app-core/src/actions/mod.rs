@@ -55,7 +55,8 @@ use crate::gpu_identity::{PciIdentity, read_state};
 use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::is_no_room;
 use crate::host::{
-    GIB, cpu_list, expand_to_siblings, fits_now, parse_cpu_list, ram_limit_for, smaller_start, vcache_cpus,
+    GIB, cpu_list, expand_to_siblings, fits_now, parse_cpu_list, pin_order, ram_limit_for, smaller_start,
+    vcache_cpus,
 };
 use crate::kept_logs;
 use crate::library::MAX_DISK_GIB;
@@ -70,6 +71,7 @@ use crate::snapshots::{delete_snapshot, go_back, take_snapshot};
 use crate::start_checks::{card_mates, start_problems, video_cap};
 use crate::tasks::{TaskRecord, write_task};
 use crate::text::shell_quote;
+use crate::thread_pins::ThreadPins;
 use crate::vm_args::{Boot, VmPlan};
 use crate::vm_host::{Stopped, VmHost};
 use rustix::fs::{FlockOperation, flock};
@@ -175,11 +177,22 @@ pub fn plan_for(context: &Context, machine: &Machine, boot: Boot) -> VmPlan {
     // CPUs the user chose win over V-Cache pinning. An unreadable list never gets here: the start
     // checks refuse it first. Either way a core's hyperthreads go together, so the VM never shares a
     // core with the host.
-    let pin = |cpus: &[u32]| cpu_list(&expand_to_siblings(&context.cpus, cpus));
-    match parse_cpu_list(&machine.pin_cpus) {
-        Ok(chosen) if !chosen.is_empty() => plan.pin = Some(pin(&chosen)),
-        _ if machine.vcache_pin => plan.pin = Some(pin(&vcache_cpus(&context.cpus))),
-        _ => {}
+    let pinned = match parse_cpu_list(&machine.pin_cpus) {
+        Ok(chosen) if !chosen.is_empty() => Some(chosen),
+        _ if machine.vcache_pin => Some(vcache_cpus(&context.cpus)),
+        _ => None,
+    }
+    .map(|cpus| expand_to_siblings(&context.cpus, &cpus));
+    if let Some(cpus) = &pinned {
+        plan.pin = Some(cpu_list(cpus));
+        if machine.pin_vcpus {
+            // Each vCPU gets one CPU, a core's two threads together, so the guest's own hyperthread
+            // pairs sit on real ones. The start checks have seen to there being enough.
+            let mut vcpus = pin_order(&context.cpus, cpus);
+            vcpus.truncate(machine.cores as usize);
+            let emulator = parse_cpu_list(&machine.emulator_cpus).unwrap_or_default();
+            plan.thread_pins = Some(ThreadPins { vcpus, emulator });
+        }
     }
     plan
 }

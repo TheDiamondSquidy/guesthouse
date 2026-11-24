@@ -18,6 +18,7 @@ use crate::monitor::Command as Qmp;
 use crate::processes::{memory_taken, passt_pid, qemu_pid};
 use crate::setup::swtpm_profile::{self, missing_rules};
 use crate::start_checks::SECOND_INSTANCE_REFUSAL;
+use crate::thread_pins;
 use crate::vm_args::{OUTPUT_FILE, PASST_PID_FILE, Sound, VmPlan};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use std::fs::{self, File};
@@ -51,9 +52,12 @@ const STALE_FILES: [&str; 5] =
 /// Which machine a run folder's logs are from. Slots are shared, so the folder alone can't say, and
 /// a file older than the note is from an earlier run, maybe another machine's.
 pub const MACHINE_NOTE: &str = "run-machine";
+/// What pinning QEMU's threads one by one did, for a person to read.
+const THREAD_PINS_NOTE: &str = "thread-pins.txt";
 /// The last run's logs are the only evidence of whatever made someone restart. The note goes along,
 /// so the kept logs still say whose they are.
-const LOGS_TO_KEEP: [&str; 4] = [daemon::OUTPUT_FILE, "serial.log", "qemu.log", MACHINE_NOTE];
+const LOGS_TO_KEEP: [&str; 5] =
+    [daemon::OUTPUT_FILE, "serial.log", "qemu.log", MACHINE_NOTE, THREAD_PINS_NOTE];
 const TPM_SOCKET: &str = "tpm.sock";
 /// A new VM hasn't booted yet, whatever an earlier one noted.
 const BOOTS_FILE: &str = "guesthouse-boots";
@@ -133,14 +137,25 @@ impl LocalHost<'_> {
             memory.hand_to(&mut qemu);
         }
         drives.hand_to(&mut qemu);
-        let spawned = detached(qemu.args(arguments))
+        let mut spawned = detached(qemu.args(arguments))
             .envs(plan.qemu_environment())
             .stdin(Stdio::null())
             .stdout(output.try_clone()?)
             .stderr(output)
             .spawn()
             .map_err(|error| not_run(program, &error))?;
+        self.pin_threads(plan, &mut spawned);
         Ok(spawned)
+    }
+
+    /// Pins QEMU's threads one by one when the plan says to, and leaves a note of what was done in the run
+    /// folder. Nothing here stops the VM: a thread that can't be pinned stays where it was.
+    fn pin_threads(&self, plan: &VmPlan, qemu: &mut Child) {
+        let Some(pins) = &plan.thread_pins else { return };
+        let pid = qemu.id();
+        let mut alive = || matches!(qemu.try_wait(), Ok(None));
+        let notes = thread_pins::apply(&self.context.processes, pid, pins, thread_pins::WAIT, &mut alive);
+        let _ = fs::write(self.run_file(THREAD_PINS_NOTE), notes.join("\n") + "\n");
     }
 
     /// QEMU with no daemon and no shared memory. Returns once its monitor answers.

@@ -140,6 +140,10 @@ pub struct VmPlan {
     pub tpm: Option<PathBuf>,
     /// CPUs to run on, as taskset takes them.
     pub pin: Option<String>,
+    /// Where each thread of QEMU goes once it is running, when they are pinned one by one.
+    pub thread_pins: Option<crate::thread_pins::ThreadPins>,
+    /// Whether the guest's CPU takes the host's invariant TSC and cache sizes.
+    pub cpu_tuning: bool,
     pub share: Option<String>,
     /// The host's drives the guest has. The app opens each and hands it to QEMU: see
     /// [`crate::host_drives::OpenDrives`].
@@ -234,6 +238,8 @@ impl VmPlan {
             vars: machine.vars.clone(),
             tpm: machine.tpm.then(|| machine.tpm_folder(context)),
             pin: None,
+            thread_pins: None,
+            cpu_tuning: machine.cpu_tuning,
             share: Some(machine.share.clone()).filter(|share| !share.is_empty()),
             drives,
             share_program: context.paths.binary(SHARE_PROGRAM),
