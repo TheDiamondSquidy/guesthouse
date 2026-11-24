@@ -20,6 +20,7 @@ pub struct Hardware {
     cores: adw::SpinRow,
     ram: adw::SpinRow,
     vram: adw::SpinRow,
+    whole_card: adw::SwitchRow,
     pin: adw::SwitchRow,
     pin_possible: bool,
     chosen: adw::EntryRow,
@@ -72,6 +73,17 @@ impl Hardware {
         );
         vram.set_visible(machine.kind == Kind::Windows);
         group.add(&vram);
+        let whole_card = adw::SwitchRow::builder()
+            .title("Let it use the whole card")
+            .subtitle(
+                "Normally the host's desktop keeps part of the card's memory, and the cap can't go past what \
+                 is left. This lifts that, so the cap can be the card's full size, and no cap means all of it. \
+                 If the host needs video memory while the guest has it, the host's programs can fail.",
+            )
+            .active(machine.vram_whole_card)
+            .build();
+        whole_card.set_visible(machine.kind == Kind::Windows);
+        group.add(&whole_card);
         let cpus = vcache_cpus(&context.cpus);
         let pin = adw::SwitchRow::builder().title("V-Cache pinning").active(machine.vcache_pin).build();
         pin.set_subtitle(&if cpus.is_empty() {
@@ -101,7 +113,8 @@ impl Hardware {
             .visible(machine.kind == Kind::Windows || machine.macos())
             .build();
         group.add(&sound);
-        let this = Self { group, cores, ram, vram, pin, pin_possible: !cpus.is_empty(), chosen, sound };
+        let this =
+            Self { group, cores, ram, vram, whole_card, pin, pin_possible: !cpus.is_empty(), chosen, sound };
         this.connect(shared);
         this
     }
@@ -120,6 +133,21 @@ impl Hardware {
         let saving = shared.clone();
         self.vram.connect_value_notify(move |row| {
             saving.machine.borrow_mut().vram_gib = row.value() as u32;
+            saving.save();
+        });
+        let cap_row = self.vram.clone();
+        let saving = shared.clone();
+        self.whole_card.connect_active_notify(move |row| {
+            let most = {
+                let mut machine = saving.machine.borrow_mut();
+                machine.vram_whole_card = row.is_active();
+                max_vram_gib_for(&saving.window.context(), &machine)
+            };
+            // The cap row's own limit moves with it, and a cap past the new one comes down to it.
+            cap_row.adjustment().set_upper(f64::from(most));
+            if cap_row.value() > f64::from(most) {
+                cap_row.set_value(f64::from(most));
+            }
             saving.save();
         });
         let saving = shared.clone();
@@ -167,6 +195,7 @@ impl Hardware {
         self.cores.set_sensitive(off);
         self.ram.set_sensitive(off);
         self.vram.set_sensitive(off);
+        self.whole_card.set_sensitive(off);
         self.pin.set_sensitive(off && self.pin_possible);
         self.chosen.set_sensitive(off);
         self.sound.set_sensitive(off);

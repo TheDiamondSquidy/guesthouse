@@ -22,10 +22,11 @@ use std::fmt::Display;
 use std::io::Write;
 
 const MUST_BE_OFF: &str = "The VM must be off to change this.";
-const SETTINGS: [&str; 17] = [
+const SETTINGS: [&str; 18] = [
     "cores",
     "ram",
     "vram",
+    "vram-whole-card",
     "screen",
     "refresh",
     "network",
@@ -148,6 +149,17 @@ pub(super) fn set(
             let cap = whole_number(key, value)?;
             in_range("The video memory cap in GiB", cap, 0, max_vram_gib_for(context, &machine).into())?;
             machine.vram_gib = cap;
+        }
+        "vram-whole-card" => {
+            only_for_windows(&machine, key)?;
+            must_be_off(context, &machine)?;
+            machine.vram_whole_card = on_or_off(key, value)?;
+            // A cap above what the host leaves goes with it, so turning it off never leaves a setting
+            // the machine can't start with.
+            let most = max_vram_gib_for(context, &machine);
+            if machine.vram_gib > most {
+                machine.vram_gib = most;
+            }
         }
         "sound" => {
             only_for_windows(&machine, key)?;
@@ -299,6 +311,7 @@ pub(super) fn show(context: &Context, machine: &Machine, out: &mut dyn Write) ->
         let cap =
             if machine.vram_gib == 0 { "no cap".to_owned() } else { format!("{} GiB", machine.vram_gib) };
         line(out, "vram", &cap)?;
+        line(out, "vram-whole-card", &switch(machine.vram_whole_card))?;
         line(out, "screen", &machine.screen)?;
         line(out, "refresh", &format!("{} Hz", machine.refresh_hz))?;
         line(out, "sound", &switch(machine.sound))?;
