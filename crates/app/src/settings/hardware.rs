@@ -145,8 +145,20 @@ impl Hardware {
             .visible(machine.kind == Kind::Windows || machine.macos())
             .build();
         group.add(&sound);
-        let this =
-            Self { group, cores, ram, vram, whole_card, pin, pin_possible: !cpus.is_empty(), chosen, each_vcpu, emulator, tuning, sound };
+        let this = Self {
+            group,
+            cores,
+            ram,
+            vram,
+            whole_card,
+            pin,
+            pin_possible: !cpus.is_empty(),
+            chosen,
+            each_vcpu,
+            emulator,
+            tuning,
+            sound,
+        };
         this.connect(shared);
         this
     }
