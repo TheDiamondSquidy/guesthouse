@@ -5,6 +5,7 @@ use super::args::NewOptions;
 use super::change::on_or_off;
 use super::recipes;
 use super::{follow_up, run_task};
+use crate::android_setup::{ANDROID_SIZES, NewAndroid, create_android};
 use crate::card_choice::{choice_at, default_choice, windows_card_choices};
 use crate::context::Context;
 use crate::defaults::{NO_GPU, account_name, sizes_for_disc};
@@ -33,6 +34,8 @@ const PERCENT_STEP: u32 = 10;
 
 /// What `--kind` calls a macOS machine, which is a plain one with a boot image of its own.
 const MACOS_KIND: &str = "macos";
+/// What `--kind` calls an Android machine, a plain one with a data disk of its own.
+const ANDROID_KIND: &str = "android";
 
 fn kind_text(kind: Kind) -> &'static str {
     match kind {
@@ -199,6 +202,7 @@ fn access_text(access: &Access) -> String {
 fn new_mac(context: &Context, name: &str, options: &NewOptions, out: &mut dyn Write) -> Result<()> {
     let others = [
         options.iso,
+        options.play,
         options.user,
         options.amd_card,
         options.amd_driver,
@@ -229,6 +233,53 @@ fn new_mac(context: &Context, name: &str, options: &NewOptions, out: &mut dyn Wr
     Ok(writeln!(out, "Run: guesthouse-vm install {}", machine.id)?)
 }
 
+/// An Android machine is made from an image of Android for VMs, given as --iso or else Guesthouse's own,
+/// downloaded, and starts set up.
+fn new_android(context: &Context, name: &str, options: &NewOptions, out: &mut dyn Write) -> Result<()> {
+    let others = [
+        options.user,
+        options.amd_card,
+        options.amd_driver,
+        options.intel_driver,
+        options.remote_desktop,
+        options.ssh,
+        options.set_up_for,
+        options.lean,
+        options.skip_scanning,
+    ];
+    if others.iter().any(Option::is_some) {
+        return Err(Failure::new(
+            "An Android machine takes --iso, --play, --disk, --cores and --ram, and nothing else.",
+        ));
+    }
+    // With no image given, Guesthouse's own is downloaded, or the one downloaded before is used.
+    let image = match options.iso {
+        Some(image) => image.into(),
+        None => {
+            let image =
+                crate::downloads::fetch_android_image(&context.paths, &|step| eprint!("\r{step}   "))?;
+            eprintln!();
+            image
+        }
+    };
+    let number = |option: &str, text: Option<&str>, usual: u32| match text {
+        Some(text) => whole_number(option, text),
+        None => Ok(usual),
+    };
+    let ram = RamField::for_plain(context, 1, ANDROID_SIZES.ram).value as u32;
+    let new = NewAndroid {
+        name: name.to_owned(),
+        cores: number("--cores", options.cores, ANDROID_SIZES.cores.min(physical_cores(&context.cpus)))?,
+        ram_gib: number("--ram", options.ram, ram)?,
+        data_gib: number("--disk", options.disk, ANDROID_SIZES.disk)?,
+        play: options.play.map(|word| on_or_off("--play", word)).transpose()?.unwrap_or(false),
+        image,
+    };
+    let machine = create_android(context, &new)?;
+    writeln!(out, "Made {} for Android in {}.", machine.name, machine.folder(context).display())?;
+    Ok(writeln!(out, "Run: guesthouse-vm start {}", machine.id)?)
+}
+
 pub(super) fn new_machine(
     context: &Context,
     name: &str,
@@ -237,6 +288,12 @@ pub(super) fn new_machine(
 ) -> Result<()> {
     if options.kind.is_some_and(|kind| kind.eq_ignore_ascii_case(MACOS_KIND)) {
         return new_mac(context, name, options, out);
+    }
+    if options.kind.is_some_and(|kind| kind.eq_ignore_ascii_case(ANDROID_KIND)) {
+        return new_android(context, name, options, out);
+    }
+    if options.play.is_some() {
+        return Err(Failure::new("--play is for an Android machine."));
     }
     let iso = options.iso.ok_or_else(|| Failure::new("new needs --iso PATH, the disc to install from."))?;
     let disc = disc_offered(context, iso, options.kind, out)?;

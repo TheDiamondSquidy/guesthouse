@@ -11,6 +11,7 @@
 pub mod account;
 pub mod actions;
 pub mod agent;
+pub mod android_setup;
 pub mod auto_snapshot;
 pub mod bridge;
 pub mod card_choice;
@@ -22,6 +23,7 @@ pub mod daemon;
 pub mod defaults;
 pub mod disk_image;
 pub mod display;
+pub mod downloads;
 pub mod driver_modes;
 pub mod duplicate;
 pub mod ending;

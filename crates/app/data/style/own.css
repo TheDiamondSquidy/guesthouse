@@ -61,10 +61,7 @@
 .spec {
   padding: 7px 12px;
   border-radius: 12px;
-  font-family: monospace;
-  font-size: 0.8em;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.85em;
 }
 
 .state-dot {
@@ -119,6 +116,12 @@
 
 .machine-thumbnail {
   border-radius: 12px;
+}
+
+/* A machine with no picture of its screen yet shows what it runs. */
+image.machine-thumbnail {
+  color: alpha(@card_fg_color, 0.65);
+  background-color: alpha(@card_fg_color, 0.06);
 }
 
 /* The viewer's bar. It lies over the guest's screen, so it is dark in light mode too. */
@@ -182,10 +185,33 @@
 
 /* The toolbar's own bar round it had this padding too, from when they shared a class. */
 .page-buttons {
-  padding: 20px 0 36px;
+  padding: 12px 0 20px;
 }
 
 /* What the chosen disc was read as, set apart from the rows round it. */
-row.verdict {
-  background-color: alpha(@accent_bg_color, 0.12);
+/* New Machine's first step: one card per kind of machine. */
+button.kind-card {
+  padding: 14px 16px;
+  border-radius: 20px;
+  background-color: @card_bg_color;
+  box-shadow: 0 0 0 1px @hairline;
+}
+
+button.kind-card:hover {
+  box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.6);
+}
+
+.preview-tag {
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: @accent_color;
+  background-color: alpha(@accent_bg_color, 0.14);
+}
+
+/* The info button beside a row, for the explanation that doesn't fit in it. */
+.info-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  opacity: 0.7;
 }

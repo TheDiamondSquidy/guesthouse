@@ -274,6 +274,18 @@ pub struct Machine {
     /// reims-vgpu's device. Left out of the file when empty, so an older build can still read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub opencore: String,
+    /// The data disk of a plain machine that holds Android for VMs, the second of its two. Its system
+    /// disk is the machine's own. Left out of the file when empty, so an older build can still read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub android_data: String,
+    /// The card an Android guest draws on, by its PCI address. Empty is the first NVIDIA card, or else
+    /// the first AMD or Intel one. Left out of the file when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub android_gpu: String,
+    /// Play services through microG, for an Android machine. Its image has microG, off unless this is.
+    /// Left out of the file when off.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub android_play: bool,
     /// A snapshot before a start that changes Windows: see [`crate::auto_snapshot`]. Nothing here is
     /// what [`crate::auto_snapshot::AUTO_SNAPSHOT_DEFAULT_ON`] says, and the user's choice is written.
     /// Left out of the file until then, so an older build can still read it.
@@ -335,6 +347,9 @@ impl Machine {
             disk_folder: String::new(),
             nvme: false,
             opencore: String::new(),
+            android_data: String::new(),
+            android_gpu: String::new(),
+            android_play: false,
             auto_snapshot: None,
             throwaway: false,
         }
@@ -429,6 +444,11 @@ impl Machine {
         self.kind == Kind::Plain && self.linux_gpu
     }
 
+    /// Whether this plain machine holds Android.
+    pub fn android(&self) -> bool {
+        self.kind == Kind::Plain && !self.android_data.is_empty()
+    }
+
     /// Whether this plain machine holds macOS.
     pub fn macos(&self) -> bool {
         self.kind == Kind::Plain && !self.opencore.is_empty()
@@ -507,6 +527,9 @@ impl Machine {
         let summary = match self.kind {
             Kind::Plain if self.macos() => {
                 format!("macOS, {cores} cores, {ram} GiB, {}, GPU preview", self.screen)
+            }
+            Kind::Plain if self.android() => {
+                format!("Android, {cores} cores, {ram} GiB, {}, GPU preview", self.screen)
             }
             Kind::Plain if self.linux_gpu => format!("{kind}, {cores} cores, {ram} GiB, Linux GPU preview"),
             Kind::Plain => format!("{kind}, {cores} cores, {ram} GiB, no GPU acceleration"),
@@ -709,6 +732,53 @@ pub fn sorted_names(folder: &Path) -> Vec<String> {
         .unwrap_or_default();
     names.sort();
     names
+}
+
+/// Fields a machine has from how it's made, which settings chosen before it's made don't replace.
+const MADE_FIELDS: [&str; 10] =
+    ["name", "disk", "vars", "iso", "installing", "kind", "opencore", "android_data", "disk_folder", "user"];
+
+/// What changed between two versions of a machine's settings, field by field: a new value, or `None` for
+/// a field gone back to its default, which the file leaves out. Fields a machine gets from how it's made
+/// aren't among them.
+pub type SettingsChanges = Vec<(String, Option<serde_json::Value>)>;
+
+/// The settings changed from `before` to `after`, as New Machine's draft of a machine's settings gives
+/// them, to be applied once the machine is made.
+pub fn settings_changes(before: &Machine, after: &Machine) -> SettingsChanges {
+    let as_map = |machine: &Machine| match serde_json::to_value(machine) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    let (before, after) = (as_map(before), as_map(after));
+    let mut changes: SettingsChanges = after
+        .iter()
+        .filter(|(key, value)| before.get(*key) != Some(*value))
+        .map(|(key, value)| (key.clone(), Some(value.clone())))
+        .collect();
+    changes.extend(before.keys().filter(|key| !after.contains_key(*key)).map(|key| (key.clone(), None)));
+    changes.retain(|(key, _)| !MADE_FIELDS.contains(&key.as_str()));
+    changes
+}
+
+impl Machine {
+    /// This machine with `changes` applied: a field set, or taken back to its default.
+    pub fn with_changes(&self, changes: &SettingsChanges) -> Result<Machine> {
+        let mut map = match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return Err(Failure::new("The machine's settings could not be read.")),
+        };
+        for (key, value) in changes {
+            match value {
+                Some(value) => map.insert(key.clone(), value.clone()),
+                None => map.remove(key),
+            };
+        }
+        let mut changed: Machine = serde_json::from_value(serde_json::Value::Object(map))
+            .map_err(|error| Failure(format!("The settings chosen could not be applied: {error}")))?;
+        changed.id.clone_from(&self.id);
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]
@@ -1314,5 +1384,18 @@ mod tests {
         assert_eq!(id_from_argument(&context, &format!("{}/", folder.display())).unwrap(), "windowsarc");
         let elsewhere = id_from_argument(&context, "/tmp/windowsarc").unwrap_err();
         assert!(elsewhere.0.contains("folder name"), "{}", elsewhere.0);
+    }
+    #[test]
+    fn settings_chosen_before_a_machine_is_made_are_applied_to_it_and_nothing_it_was_made_with() {
+        let seed = Machine::new("", "Draft", "", "");
+        let chosen = Machine { passt: true, android_play: true, name: "Other".into(), ..seed.clone() };
+        let changes = settings_changes(&seed, &chosen);
+        let made = Machine { tpm: true, ..sample() };
+        let applied = made.with_changes(&changes).unwrap();
+        assert!(applied.passt && applied.android_play && applied.tpm, "chosen ones set, made ones kept");
+        assert_eq!((applied.name.as_str(), applied.id.as_str()), (made.name.as_str(), made.id.as_str()));
+        let back = settings_changes(&chosen, &seed);
+        let undone = applied.with_changes(&back).unwrap();
+        assert!(!undone.passt && !undone.android_play, "a setting taken back to its default goes back");
     }
 }
