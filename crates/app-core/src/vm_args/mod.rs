@@ -128,6 +128,8 @@ pub struct VmPlan {
     /// Where the app reaches the helper for dropped and dragged files, which only Windows has.
     pub files_port: Option<u16>,
     pub cores: u32,
+    /// QEMU's `-smp` words: with hyperthreading on the host, the guest's cores have its threads too.
+    pub smp: String,
     pub ram: String,
     pub screen: String,
     pub disk: String,
@@ -223,6 +225,7 @@ impl VmPlan {
             agent_port: context.paths.agent_port(slot),
             files_port: (machine.kind == crate::machine::Kind::Windows).then(|| slot.files_port()),
             cores: machine.cores,
+            smp: crate::host::smp_topology(&context.cpus, machine.cores),
             ram: format!("{}G", machine.ram_gib),
             // Its device takes any size, where the VGA only has the firmware's.
             screen: if machine.macos() { machine.screen.clone() } else { machine.basic_screen().to_owned() },

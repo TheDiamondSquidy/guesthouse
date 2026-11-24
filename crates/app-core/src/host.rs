@@ -118,15 +118,61 @@ pub fn cpu_list(cpus: &[u32]) -> String {
 
 /// The most cores a machine can have: past this, vCPUs and the host would fight for them.
 pub fn physical_cores(root: &Path) -> u32 {
-    let mut cores = BTreeSet::new();
+    physical_core_groups(root).len() as u32
+}
+
+/// The CPUs of each physical core, one list per core, in order of their first CPU. A core with
+/// hyperthreading lists both its threads, a P-core on Alder Lake and later among them, and an E-core
+/// lists one. Read from `thread_siblings_list`, or, where a CPU has none, from its package and core id.
+pub fn physical_core_groups(root: &Path) -> Vec<Vec<u32>> {
+    let mut by_core: BTreeMap<(String, String), BTreeSet<u32>> = BTreeMap::new();
     for cpu in cpu_numbers(root) {
         let folder = root.join(format!("cpu{cpu}/topology"));
         let read = |name: &str| fs::read_to_string(folder.join(name)).ok();
-        if let (Some(core), Some(package)) = (read("core_id"), read("physical_package_id")) {
-            cores.insert((package, core));
+        let siblings = read("thread_siblings_list").and_then(|text| parse_cpu_list(text.trim()).ok());
+        if let Some(&first) = siblings.as_ref().and_then(|siblings| siblings.first()) {
+            by_core
+                .entry((String::new(), first.to_string()))
+                .or_default()
+                .extend(siblings.unwrap_or_default());
+        } else if let (Some(core), Some(package)) = (read("core_id"), read("physical_package_id")) {
+            by_core.entry((package.trim().to_owned(), core.trim().to_owned())).or_default().insert(cpu);
         }
     }
-    cores.len() as u32
+    let mut groups: Vec<Vec<u32>> = by_core.into_values().map(|set| set.into_iter().collect()).collect();
+    groups.sort_by_key(|group| group.first().copied().unwrap_or(0));
+    groups
+}
+
+/// The most threads any core has: 2 with hyperthreading, else 1. On a hybrid CPU the P-cores set it.
+pub fn smt_threads(root: &Path) -> u32 {
+    physical_core_groups(root).iter().map(|group| group.len() as u32).max().unwrap_or(1).max(1)
+}
+
+/// These CPUs and the other threads of each core they touch, so a chosen CPU never leaves its
+/// hyperthread sibling for the host to share a core with. Every CPU that was asked for stays, even one
+/// that no core lists.
+pub fn expand_to_siblings(root: &Path, cpus: &[u32]) -> Vec<u32> {
+    let wanted: BTreeSet<u32> = cpus.iter().copied().collect();
+    let mut all = wanted.clone();
+    for group in physical_core_groups(root) {
+        if group.iter().any(|cpu| wanted.contains(cpu)) {
+            all.extend(group);
+        }
+    }
+    all.into_iter().collect()
+}
+
+/// The `-smp` words for this many vCPUs. With hyperthreading and a count the threads divide, the guest
+/// is given whole cores of that many threads, as the host has, so Windows schedules its own threads as
+/// it would on real hardware. Any other count is that many single-thread cores, written as it always was.
+pub fn smp_topology(root: &Path, vcpus: u32) -> String {
+    let threads = smt_threads(root);
+    if threads > 1 && vcpus >= threads && vcpus % threads == 0 {
+        format!("{vcpus},sockets=1,cores={},threads={threads}", vcpus / threads)
+    } else {
+        format!("{vcpus},sockets=1,cores={vcpus}")
+    }
 }
 
 /// What the host keeps of `total` bytes of RAM.
@@ -347,13 +393,17 @@ pub mod stand_in {
 
     /// CPUs with these L3 sizes, half of them the SMT siblings of the rest.
     pub fn fake_cpus(scratch: &Scratch, name: &str, sizes: &[u32]) -> PathBuf {
+        // CPU n and n + half are the two threads of one core, as on a PC whose second threads come last.
+        let half = sizes.len() / 2;
         for (cpu, size) in sizes.iter().enumerate() {
             scratch.write(&format!("{name}/cpu{cpu}/cache/index3/size"), format!("{size}K\n"));
-            scratch.write(
-                &format!("{name}/cpu{cpu}/topology/core_id"),
-                format!("{}\n", cpu % (sizes.len() / 2)),
-            );
+            scratch.write(&format!("{name}/cpu{cpu}/topology/core_id"), format!("{}\n", cpu % half));
             scratch.write(&format!("{name}/cpu{cpu}/topology/physical_package_id"), "0\n");
+            let (first, second) = (cpu % half, cpu % half + half);
+            scratch.write(
+                &format!("{name}/cpu{cpu}/topology/thread_siblings_list"),
+                format!("{first},{second}\n"),
+            );
         }
         std::fs::create_dir_all(scratch.path(name).join("cpufreq")).unwrap();
         scratch.path(name)
@@ -386,6 +436,47 @@ mod tests {
         for bad in ["a", "1-", "-3", "5-2", "1,,x", "0-99999999", "9999"] {
             assert!(parse_cpu_list(bad).is_err(), "{bad} should be refused");
         }
+    }
+
+    #[test]
+    fn hyperthread_siblings_are_one_core_and_stay_together() {
+        let scratch = Scratch::new();
+        let root = fake_cpus(&scratch, "smt", &[32768; 8]);
+        assert_eq!(physical_core_groups(&root), vec![vec![0, 4], vec![1, 5], vec![2, 6], vec![3, 7]]);
+        assert_eq!((physical_cores(&root), smt_threads(&root)), (4, 2));
+        assert_eq!(expand_to_siblings(&root, &[0, 1]), vec![0, 1, 4, 5]);
+        assert_eq!(expand_to_siblings(&root, &[0, 4]), vec![0, 4], "whole pairs are left as they are");
+        assert_eq!(expand_to_siblings(&root, &[9]), vec![9], "a CPU no core lists is kept");
+        assert!(expand_to_siblings(&root, &[]).is_empty());
+        assert_eq!(smp_topology(&root, 8), "8,sockets=1,cores=4,threads=2");
+        assert_eq!(smp_topology(&root, 4), "4,sockets=1,cores=2,threads=2");
+        assert_eq!(smp_topology(&root, 7), "7,sockets=1,cores=7", "an odd count has no whole cores");
+        assert_eq!(smp_topology(&root, 1), "1,sockets=1,cores=1");
+    }
+
+    #[test]
+    fn a_hybrid_cpu_counts_each_efficiency_core_once() {
+        // The shape of an i9-12900K: 8 P-cores of 2 threads (0-15) and 8 E-cores of 1 (16-23).
+        let scratch = Scratch::new();
+        for cpu in 0..24u32 {
+            let siblings = if cpu < 16 { format!("{},{}\n", cpu & !1, cpu | 1) } else { format!("{cpu}\n") };
+            scratch.write(&format!("hybrid/cpu{cpu}/topology/thread_siblings_list"), siblings);
+        }
+        let root = scratch.path("hybrid");
+        assert_eq!((physical_cores(&root), smt_threads(&root)), (16, 2));
+        assert_eq!(expand_to_siblings(&root, &[2, 17]), vec![2, 3, 17], "an E-core has no sibling to add");
+        assert_eq!(smp_topology(&root, 16), "16,sockets=1,cores=8,threads=2");
+    }
+
+    #[test]
+    fn a_core_with_no_sibling_list_is_found_by_its_ids() {
+        let scratch = Scratch::new();
+        for cpu in 0..4u32 {
+            scratch.write(&format!("old/cpu{cpu}/topology/core_id"), format!("{}\n", cpu % 2));
+            scratch.write(&format!("old/cpu{cpu}/topology/physical_package_id"), "0\n");
+        }
+        let root = scratch.path("old");
+        assert_eq!(physical_core_groups(&root), vec![vec![0, 2], vec![1, 3]]);
     }
 
     #[test]

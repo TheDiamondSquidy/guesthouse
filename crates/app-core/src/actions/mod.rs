@@ -54,7 +54,9 @@ use crate::failure::{Failure, Result};
 use crate::gpu_identity::{PciIdentity, read_state};
 use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::is_no_room;
-use crate::host::{GIB, cpu_list, fits_now, parse_cpu_list, ram_limit_for, smaller_start, vcache_cpus};
+use crate::host::{
+    GIB, cpu_list, expand_to_siblings, fits_now, parse_cpu_list, ram_limit_for, smaller_start, vcache_cpus,
+};
 use crate::kept_logs;
 use crate::library::MAX_DISK_GIB;
 use crate::log::{clock_text, write_log};
@@ -171,10 +173,12 @@ pub fn plan_for(context: &Context, machine: &Machine, boot: Boot) -> VmPlan {
     let cap = video_cap(machine, &mates, max_vram_gib_for(context, machine));
     let mut plan = VmPlan::new(context, machine, boot, context.slot, cap);
     // CPUs the user chose win over V-Cache pinning. An unreadable list never gets here: the start
-    // checks refuse it first.
+    // checks refuse it first. Either way a core's hyperthreads go together, so the VM never shares a
+    // core with the host.
+    let pin = |cpus: &[u32]| cpu_list(&expand_to_siblings(&context.cpus, cpus));
     match parse_cpu_list(&machine.pin_cpus) {
-        Ok(chosen) if !chosen.is_empty() => plan.pin = Some(cpu_list(&chosen)),
-        _ if machine.vcache_pin => plan.pin = Some(cpu_list(&vcache_cpus(&context.cpus))),
+        Ok(chosen) if !chosen.is_empty() => plan.pin = Some(pin(&chosen)),
+        _ if machine.vcache_pin => plan.pin = Some(pin(&vcache_cpus(&context.cpus))),
         _ => {}
     }
     plan

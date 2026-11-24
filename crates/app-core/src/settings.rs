@@ -19,8 +19,8 @@ pub const CARD_MEMORY_FIELD: &str = "card_memory_mib";
 /// had their own NVIDIA card has none.
 pub const CARD_MEMORIES_FIELD: &str = "card_memories";
 /// The host keeps an eighth of the card, and at least 2 GiB, for its desktop.
-const HOST_SHARE: u64 = 16;
-const HOST_MINIMUM_GIB: u64 = 0;
+const HOST_SHARE: u64 = 8;
+const HOST_MINIMUM_GIB: u64 = 2;
 
 pub type Fields = Map<String, Value>;
 
