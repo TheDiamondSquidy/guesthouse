@@ -8,6 +8,7 @@
 //! file: see [`crate::udmabuf`]. A buffer taken in is kept while any of its mappings in the space
 //! are, and let go after the last.
 
+use crate::buffer_list::BufferList;
 use crate::device::Device;
 use crate::fault::{self, Fault};
 use crate::fence_ib::{FenceIbs, Writer};
@@ -165,6 +166,8 @@ pub struct SpaceVm {
     shares: HashMap<u32, Share>,
     /// How fast the card's clock runs, to read the times runs note.
     clock_khz: u32,
+    /// The kernel's list of the buffers a run here may touch, made when they change.
+    lists: BufferList,
 }
 
 /// Where a run's fence is in guest memory, by guest physical address, and the value it ends with.
@@ -248,6 +251,7 @@ impl SpaceVm {
             video_wake_failed: false,
             shares: HashMap::new(),
             clock_khz: device.info().counter_freq_khz,
+            lists: BufferList::default(),
         })
     }
 
@@ -275,6 +279,22 @@ impl SpaceVm {
     /// The fault that stopped this space, if its work has had one.
     pub fn faulted(&self) -> Option<Fault> {
         self.faults.found()
+    }
+
+    /// The buffers a submission may touch, made into a list once and named by its handle after that.
+    /// The guest doesn't say which it uses, so every buffer mapped here is in it.
+    fn buffer_list(&mut self, buffers: &[GemHandle]) -> io::Result<Option<u64>> {
+        Ok(self.lists.get(&self.file, buffers))
+    }
+
+    /// The buffers a submission here may name: every one mapped here, and this space's own for fence
+    /// writers and video commands once they are made. Every way of sending names this same set, so
+    /// they share one list and a guest that mixes them doesn't remake it at each switch.
+    fn named_buffers(&self) -> Vec<GemHandle> {
+        let mut buffers = self.books.handles();
+        buffers.extend(self.fence_ibs.as_ref().map(FenceIbs::handle));
+        buffers.extend(self.video_ib.as_ref().map(VideoIb::handle));
+        buffers
     }
 
     /// Runs command buffers already mapped here on the engine family `ip_type`, in order, and waits
@@ -345,15 +365,15 @@ impl SpaceVm {
                 fault.address, fault.status
             )));
         }
-        let Some(own) = self.video_ib.as_ref().map(VideoIb::handle) else {
+        if self.video_ib.is_none() {
             return Err(io::Error::other("no buffer for video commands was made here"));
-        };
+        }
         let retired = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
         // The guest doesn't say which buffers the work uses, so it may use any mapped here.
-        let mut buffers = self.books.handles();
-        buffers.push(own);
+        let buffers = self.named_buffers();
+        let list = self.buffer_list(&buffers)?;
         let submitted = self.contexts.submit(&self.file, HW_IP_VCN_ENC, Some(queue), |context| {
-            submit::submit_all(&self.file, context, HW_IP_VCN_ENC, runs, &buffers, &retired).map(|_| ())
+            submit::submit_all(&self.file, context, HW_IP_VCN_ENC, runs, &buffers, list, &retired).map(|_| ())
         });
         match submitted {
             Ok(()) => {
@@ -450,7 +470,8 @@ impl SpaceVm {
             // As in `submit_and_wait`: any buffer mapped here may be used.
             let buffers = self.books.handles();
             let submitted = self.contexts.submit(&self.file, ip_type, None, |context| {
-                submit::submit_after(&self.file, context, ip_type, ibs, &buffers, &waits, &signal).map(|_| ())
+                submit::submit_after(&self.file, context, ip_type, ibs, &buffers, None, &waits, &signal)
+                    .map(|_| ())
             });
             match submitted {
                 Ok(()) => Ok(Sent::OnCard(signal)),
@@ -491,10 +512,12 @@ impl SpaceVm {
         patience: Patience,
     ) -> io::Result<Ran> {
         let signal = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
-        // The guest doesn't say which buffers the work uses, so it may use any mapped here.
-        let buffers = self.books.handles();
+        // The guest doesn't say which buffers the work uses, so it may use any mapped here, named by
+        // a list the kernel keeps rather than by every handle each time.
+        let buffers = self.named_buffers();
+        let list = self.buffer_list(&buffers)?;
         let submitted = self.contexts.submit(&self.file, ip_type, queue, |context| {
-            submit::submit_all(&self.file, context, ip_type, ibs, &buffers, &signal).map(|_| ())
+            submit::submit_all(&self.file, context, ip_type, ibs, &buffers, list, &signal).map(|_| ())
         });
         let ran = match submitted {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(Ran::Refused),
@@ -547,9 +570,9 @@ impl SpaceVm {
     /// and doesn't wait for them. The last is the fence writer in `slot`, which writes `fence`.
     pub fn send(&mut self, ip_type: u32, ibs: &[Ib], slot: usize, fence: GuestFence) -> io::Result<()> {
         only_copies_for_the_video_ring(ip_type, ibs)?;
-        let Some(fence_ibs) = &self.fence_ibs else {
+        if self.fence_ibs.is_none() {
             return Err(io::Error::other("no fence writers were made here"));
-        };
+        }
         // As in `run`: nothing more is sent to a space whose work has faulted.
         if let Some(fault) = self.faults.look(&self.file) {
             return Err(io::Error::other(format!(
@@ -559,12 +582,13 @@ impl SpaceVm {
             )));
         }
         let retired = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
-        // The guest doesn't say which buffers the work uses, so it may use any mapped here.
-        let mut buffers = self.books.handles();
-        buffers.push(fence_ibs.handle());
+        // The guest doesn't say which buffers the work uses, so it may use any mapped here, and the
+        // fence writers, which are this file's own.
+        let buffers = self.named_buffers();
         let stamped = with_clock_notes(ibs, slot);
+        let list = self.buffer_list(&buffers)?;
         let submitted = self.contexts.submit(&self.file, ip_type, Some(fence.queue), |context| {
-            submit::submit_all(&self.file, context, ip_type, &stamped, &buffers, &retired).map(|_| ())
+            submit::submit_all(&self.file, context, ip_type, &stamped, &buffers, list, &retired).map(|_| ())
         });
         match submitted {
             Ok(_) => {
@@ -668,6 +692,7 @@ impl SpaceVm {
             return Err(error);
         }
         self.books.add(buffer, handle, address, offset, length);
+        self.lists.mark_stale();
         Ok(())
     }
 
@@ -676,8 +701,12 @@ impl SpaceVm {
         let Some(unmapping) = self.books.remove(address) else {
             return Ok(());
         };
+        self.lists.mark_stale();
         let result = memory::unmap(&self.file, unmapping.handle, unmapping.address, unmapping.length);
         if unmapping.last_use {
+            // The cached list holds a reference on this buffer, so closing the handle alone would
+            // keep its memory until the next submission remakes the list.
+            self.lists.close(&self.file, unmapping.handle);
             memory::close(&self.file, unmapping.handle);
         }
         result
@@ -775,6 +804,7 @@ mod tests {
             video_wake_failed: false,
             shares: HashMap::new(),
             clock_khz: 100_000,
+            lists: BufferList::default(),
         }
     }
 
