@@ -18,7 +18,8 @@ pub const CARD_MEMORY_FIELD: &str = "card_memory_mib";
 /// Every NVIDIA card's memory in MiB, by its address, in `setup.json`. A setup from before machines
 /// had their own NVIDIA card has none.
 pub const CARD_MEMORIES_FIELD: &str = "card_memories";
-/// The host keeps an eighth of the card, and at least 2 GiB, for its desktop.
+/// The host keeps a sixteenth of the card, and no least amount, for its desktop. The daemon's own figure, in
+/// `guesthouse_core::config`, must be the same.
 const HOST_SHARE: u64 = 16;
 const HOST_MINIMUM_GIB: u64 = 0;
 
@@ -145,9 +146,9 @@ mod tests {
         let context = scratch_context(&scratch);
         assert_eq!(max_vram_gib(&context), 0, "no card known yet");
         write_setup(&context, fields(json!({CARD_MEMORY_FIELD: 16 * 1024}))).unwrap();
-        assert_eq!(max_vram_gib(&context), 14);
+        assert_eq!(max_vram_gib(&context), 15);
         write_setup(&context, fields(json!({CARD_MEMORY_FIELD: 32607}))).unwrap();
-        assert_eq!(max_vram_gib(&context), 28, "28 GiB on a 32 GiB card");
+        assert_eq!(max_vram_gib(&context), 30, "30 GiB on a 32 GiB card");
     }
 
     #[test]
@@ -161,15 +162,15 @@ mod tests {
         on_second.use_windows_card(GpuMaker::Nvidia, "0000:02:00.0");
         let mut on_first = on_setups.clone();
         on_first.use_windows_card(GpuMaker::Nvidia, "0000:01:00.0");
-        assert_eq!(max_vram_gib_for(&context, &on_setups), 14);
-        assert_eq!(max_vram_gib_for(&context, &on_first), 14, "setup's card by its address");
+        assert_eq!(max_vram_gib_for(&context, &on_setups), 15);
+        assert_eq!(max_vram_gib_for(&context, &on_first), 15, "setup's card by its address");
         assert_eq!(max_vram_gib_for(&context, &on_second), 0, "an old setup doesn't know the card");
         let memories = json!({"0000:01:00.0": 16376, "0000:02:00.0": 6144});
         write_setup(&context, fields(json!({CARD_MEMORIES_FIELD: memories}))).unwrap();
-        assert_eq!(max_vram_gib_for(&context, &on_second), 4, "a 6 GiB card keeps 2 for the host");
-        assert_eq!(max_vram_gib_for(&context, &on_setups), 14);
+        assert_eq!(max_vram_gib_for(&context, &on_second), 6, "a 6 GiB card keeps nothing for the host");
+        assert_eq!(max_vram_gib_for(&context, &on_setups), 15);
         let mut on_amd = on_setups;
         on_amd.use_windows_card(GpuMaker::Amd, "0000:02:00.0");
-        assert_eq!(max_vram_gib_for(&context, &on_amd), 14, "AMD's is as it was");
+        assert_eq!(max_vram_gib_for(&context, &on_amd), 15, "AMD's is the setup's card's");
     }
 }
