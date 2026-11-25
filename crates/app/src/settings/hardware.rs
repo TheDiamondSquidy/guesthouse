@@ -28,6 +28,7 @@ pub struct Hardware {
     cores: adw::SpinRow,
     ram: adw::SpinRow,
     vram: adw::SpinRow,
+    whole_card: adw::SwitchRow,
     pin: adw::SwitchRow,
     pin_possible: bool,
     chosen: adw::EntryRow,
@@ -76,6 +77,18 @@ impl Hardware {
             None => ram.set_subtitle(field.subtitle.trim_end_matches('.')),
         }
         group.add(&ram);
+        let whole_card = adw::SwitchRow::builder()
+            .title("Whole Card")
+            .subtitle("Lets the cap go up to the card's full size")
+            .active(machine.vram_whole_card)
+            .build();
+        explain(
+            &whole_card,
+            "Normally the host's desktop keeps part of the card's memory, and the cap can't go past what is \
+             left. This lifts that, so the cap can be the card's full size, and no cap means all of it. If the \
+             host needs video memory while the guest has it, the host's programs can fail.",
+        );
+        whole_card.set_visible(machine.kind == Kind::Windows);
         let cpus = vcache_cpus(&context.cpus);
         let pin = adw::SwitchRow::builder().title("V-Cache Pinning").active(machine.vcache_pin).build();
         pin.set_subtitle(&if cpus.is_empty() {
@@ -105,6 +118,7 @@ impl Hardware {
         // Only Windows' GPU-PV has a cap. The row is still made, as the card's row sets its top.
         if machine.kind == Kind::Windows {
             advanced.add(&vram);
+            advanced.add(&whole_card);
         }
         // Only a GPU machine has ever had sound, and macOS and Android guests count as one. The Overview
         // adds it after the disk.
@@ -121,6 +135,7 @@ impl Hardware {
             cores,
             ram,
             vram,
+            whole_card,
             pin,
             pin_possible: !cpus.is_empty(),
             chosen,
@@ -144,6 +159,21 @@ impl Hardware {
         let saving = shared.clone();
         self.vram.connect_value_notify(move |row| {
             saving.machine.borrow_mut().vram_gib = row.value() as u32;
+            saving.save();
+        });
+        let cap_row = self.vram.clone();
+        let saving = shared.clone();
+        self.whole_card.connect_active_notify(move |row| {
+            let most = {
+                let mut machine = saving.machine.borrow_mut();
+                machine.vram_whole_card = row.is_active();
+                max_vram_gib_for(&saving.window.context(), &machine)
+            };
+            // The cap row's own limit moves with it, and a cap past the new one comes down to it.
+            cap_row.adjustment().set_upper(f64::from(most));
+            if cap_row.value() > f64::from(most) {
+                cap_row.set_value(f64::from(most));
+            }
             saving.save();
         });
         let saving = shared.clone();
@@ -191,6 +221,7 @@ impl Hardware {
         self.cores.set_sensitive(off);
         self.ram.set_sensitive(off);
         self.vram.set_sensitive(off);
+        self.whole_card.set_sensitive(off);
         self.pin.set_sensitive(off && self.pin_possible);
         self.chosen.set_sensitive(off);
         self.sound.set_sensitive(off);

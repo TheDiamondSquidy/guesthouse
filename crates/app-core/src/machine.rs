@@ -154,6 +154,10 @@ pub struct Machine {
     /// The most video memory it may use. 0 is no cap.
     #[serde(default)]
     pub vram_gib: u32,
+    /// Lets the cap, and what no cap means, go up to the whole card, where it is otherwise held below the
+    /// part the host's desktop keeps. Left out of the file when off, so an older build can still read it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vram_whole_card: bool,
     /// A virtual TPM and Secure Boot, from when it was installed. Older machines stay without.
     #[serde(default)]
     pub tpm: bool,
@@ -323,6 +327,7 @@ impl Machine {
             clipboard: false,
             share: String::new(),
             vram_gib: 0,
+            vram_whole_card: false,
             tpm: false,
             overlay: false,
             direct_frames_off: false,

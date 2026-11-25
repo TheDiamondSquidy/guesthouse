@@ -112,10 +112,12 @@ pub fn shared_problems(machine: &Machine, others: &[Machine], facts: &SharedFact
 }
 
 /// The cap a machine starts with: its own, or what `others`, the machines running on its card, leave.
-/// Alone on its card it needs none.
+/// Alone on its card it needs none, unless it is to have the whole card: the daemon with no cap keeps
+/// the host's share back, so such a machine is given the card's size as its cap.
 pub fn video_cap(machine: &Machine, others: &[Machine], max_vram_gib: u32) -> u32 {
     match (machine.vram_gib, others.is_empty()) {
         (0, false) => video_memory_left(others, max_vram_gib),
+        (0, true) if machine.vram_whole_card => max_vram_gib,
         (cap, _) => cap,
     }
 }
@@ -396,6 +398,15 @@ mod tests {
         let (context, machine) = startable(&scratch);
         let found = start_problems(&context, &Machine { vcache_pin: true, ..machine }).unwrap();
         assert!(says(&found, "no V-Cache"));
+    }
+
+    #[test]
+    fn a_machine_with_the_whole_card_is_capped_at_it_and_others_at_their_own() {
+        let whole = Machine { vram_whole_card: true, ..Machine::new("w", "W", "/d", "/v") };
+        assert_eq!(video_cap(&whole, &[], 8), 8, "no cap means the whole card for it");
+        assert_eq!(video_cap(&Machine { vram_gib: 5, ..whole.clone() }, &[], 8), 5, "its own cap still wins");
+        assert_eq!(video_cap(&Machine { vram_whole_card: false, ..whole.clone() }, &[], 6), 0, "as ever");
+        assert_eq!(video_cap(&whole, &[], 0), 0, "a card setup doesn't know has nothing to cap by");
     }
 
     #[test]

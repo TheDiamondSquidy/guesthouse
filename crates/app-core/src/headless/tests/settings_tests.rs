@@ -217,7 +217,9 @@ fn show_lists_what_the_kind_of_machine_has() {
     );
     let windows = said(&context, "show win").0;
     assert!(
-        windows.contains("vram      no cap\nscreen    1920x1080\nrefresh   144 Hz\nsound     on\n"),
+        windows.contains(
+            "vram      no cap\nvram-whole-card off\nscreen    1920x1080\nrefresh   144 Hz\nsound     on\n"
+        ),
         "{windows}"
     );
 }

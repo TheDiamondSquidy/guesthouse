@@ -85,6 +85,12 @@ fn video_budget_gib(dedicated: u64) -> u64 {
     card.saturating_sub((card / HOST_SHARE).max(HOST_MINIMUM_GIB))
 }
 
+/// What a machine may have of a card with this much dedicated memory: all of it, if it is to have the
+/// whole card, and otherwise what the host leaves.
+fn vram_gib_for_card(dedicated: u64, whole_card: bool) -> u32 {
+    if whole_card { dedicated.div_ceil(GIB) as u32 } else { video_budget_gib(dedicated) as u32 }
+}
+
 /// The same for a card of this many MiB, as a Linux guest's device has to be told.
 pub(crate) fn video_budget_gib_of(card_mib: u64) -> u32 {
     video_budget_gib(card_mib * MIB) as u32
@@ -97,11 +103,16 @@ pub fn max_vram_gib(context: &Context) -> u32 {
 }
 
 /// The same for this machine's card. A Windows machine given an NVIDIA card by its address has that
-/// card's, and 0 until setup knows it. Every other machine has setup's card's, as it always had.
+/// card's, and 0 until setup knows it. Every other machine has setup's card's, as it always had. A
+/// machine set to have the whole card has all of it, with nothing kept for the host.
 pub fn max_vram_gib_for(context: &Context, machine: &Machine) -> u32 {
+    let whole = machine.vram_whole_card;
     match (machine.windows_maker(), machine.windows_card_address()) {
-        (Some(GpuMaker::Nvidia), Some(pci)) => video_budget_gib(card_memory_mib(context, pci) * MIB) as u32,
-        _ => max_vram_gib(context),
+        (Some(GpuMaker::Nvidia), Some(pci)) => vram_gib_for_card(card_memory_mib(context, pci) * MIB, whole),
+        _ => {
+            let mib = read_setup(context).get(CARD_MEMORY_FIELD).and_then(Value::as_u64).unwrap_or(0);
+            vram_gib_for_card(mib * MIB, whole)
+        }
     }
 }
 
@@ -148,6 +159,27 @@ mod tests {
         assert_eq!(max_vram_gib(&context), 14);
         write_setup(&context, fields(json!({CARD_MEMORY_FIELD: 32607}))).unwrap();
         assert_eq!(max_vram_gib(&context), 28, "28 GiB on a 32 GiB card");
+    }
+
+    #[test]
+    fn a_machine_set_to_have_the_whole_card_is_not_held_below_it() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let mut machine = Machine::new("w", "W", "/d", "/v");
+        assert_eq!(max_vram_gib_for(&context, &machine), 0, "no card known yet, whole or not");
+        machine.vram_whole_card = true;
+        assert_eq!(max_vram_gib_for(&context, &machine), 0);
+        write_setup(&context, fields(json!({CARD_MEMORY_FIELD: 8 * 1024}))).unwrap();
+        assert_eq!(max_vram_gib_for(&context, &machine), 8, "all of an 8 GiB card");
+        machine.vram_whole_card = false;
+        assert_eq!(max_vram_gib_for(&context, &machine), 6, "6 of it, with the host's 2 kept");
+        write_setup(&context, fields(json!({CARD_MEMORY_FIELD: 8188}))).unwrap();
+        machine.vram_whole_card = true;
+        assert_eq!(
+            max_vram_gib_for(&context, &machine),
+            8,
+            "a card a little under a round size counts as it"
+        );
     }
 
     #[test]

@@ -138,6 +138,7 @@ A Windows machine gets Remote Desktop and no SSH, as the dialog starts it. `--re
 | `cores`, `ram` | a whole number, within what this PC allows | all |
 | `vram` | the video memory cap in GiB, 0 for none | Windows |
 | `sound` | on or off | Windows |
+| `vram-whole-card` | on or off: whether the video memory cap may go up to the whole card, and no cap means all of it, where it is otherwise held below what the host's desktop keeps | Windows |
 | `window-speed` | on or off: whether programs in a window are shown without a copy of every frame, and on NVIDIA whether Vulkan and OpenGL present through DXGI | Windows |
 | `dlss` | on or off: whether Guesthouse's NVAPI wrapper, which DLSS needs, is in System32 in place of NVIDIA's. Off for a game whose anti-cheat refuses the unsigned wrapper | Windows on an NVIDIA card |
 | `start-unjailed` | on or off: on lets a machine with a GPU start unjailed where the kernel can't jail it, as "Start without a jail" does in the app. Where it can, the machine is jailed either way | all |
