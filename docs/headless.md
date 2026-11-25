@@ -15,6 +15,12 @@ guesthouse-vm take-snapshot NAME SNAPSHOT
 guesthouse-vm go-back NAME [SNAPSHOT] [--yes]
 guesthouse-vm delete-snapshot NAME SNAPSHOT [--yes]
 guesthouse-vm idle NAME [--minutes N]
+guesthouse-vm windows NAME [--json]
+guesthouse-vm app NAME PROGRAM [--start-menu]
+guesthouse-vm apps NAME
+guesthouse-vm launcher NAME list
+guesthouse-vm launcher NAME add PROGRAM
+guesthouse-vm launcher NAME remove PROGRAM
 guesthouse-vm share
 
 guesthouse-vm new NAME --iso PATH [--kind windows|ubuntu|plain] [--disk GIB] [--disk-folder PATH]
@@ -71,7 +77,31 @@ For an Ubuntu machine, a plain VM or a macOS machine, only the CPU time can be r
 
 The reading sends `guest/idle.ps1` through the agent. The only thing it does in Windows is to start a task in the user's session for a moment, as only a program there can see that session's input. The task, its helper script in `C:\gpupv` and its answer file in the public documents folder are removed when it is done, or at the next reading if one was cut short.
 
+`windows` lists the app windows a running Windows machine has, one line each: the guest's handle for it, program, title, size and position of the window itself, and in brackets whether it has the focus, is minimized or hidden under an overflow cell, which popup it is of which window, and where its picture is on the guest's screen when that is not where the window is. `--json` prints the helper's last layout as it sent it, which also has each window's process id, class, the title bar's height and the width of its buttons, and whether it can be resized. It is the first step towards showing one program of a guest as a window of its own.
+
+`app NAME PROGRAM` starts a program in a running Windows machine, by its path or name in the guest, such as `C:\Windows\notepad.exe`, and says what the helper answered. With `--start-menu` PROGRAM is the id of a Start menu program instead, as `apps` lists them. It starts the program in the guest only: the guest keeps the window where its helper parks it. `guesthouse --app` does the rest as well.
+
+Both need `set NAME app-windows on` first, which is off for every machine until then, and both say so if it is off. With it on, QEMU gets a forward of its own on this PC, to port 8769 in the guest, as the files helper has one, and the machine needs a start for that. A machine that was started before it was turned on has no such forward, and the commands say to restart it. A helper in the user's session, `guest/app-windows.ps1` with `guest/app-windows.cs`, answers: the app sends it the machine's token first, then both sides send lines of JSON. If it isn't running, `app` starts it through the agent and leaves it running, and `windows` starts it for the look and ends it after, so no helper that a look started is left running. It takes a few seconds more then. With nobody logged in to the guest there is no session for the helper, and the command says so. The helper takes one connection at a time, and a second one replaces the first, so running either command while a window of the machine's own app windows is open makes that one connect again a moment later.
+
+The helper leaves out what no user would call an app window. Menus, tooltips and drop-downs are windows of their own, and are listed as popups with the window they belong to.
+
 `share` prints how each card with a running machine is shared, in the words of the library page's Sharing the Card panel: the whole card, then each machine's GPU time and video memory. It looks twice, a second apart, as AMD's and Intel's engine times need two looks. On NVIDIA each machine's time is the driver's last one-second sample of its processes, and its video memory is shown twice: what the guest allocated against its cap, and what the driver charges its processes with, which is more, as it includes the daemon's own work. It only reads.
+
+### One step from a click to a window
+
+`guesthouse --app NAME PROGRAM [--start-menu]` is the app's own program, not `guesthouse-vm`, as it starts the window viewer. It does everything in one go. It starts the machine if it is off, the same way `start` does, and says each step. It waits for the helper in the guest to answer, which includes a guest that has only just come up and has no session yet. It starts the program, and then makes sure the machine has one viewer for its app windows: if none is running it starts `guesthouse --app-windows NAME` for it, and if one is, it only starts the program and ends. It needs no display itself, so a failure goes to the terminal and to the log, in words. It refuses at once, before it starts anything, for a machine that is not Windows or has app-windows off.
+
+The viewer is one for each machine, whatever starts it. It holds a lock in the machine's run folder as long as it lives, and a viewer that finds it taken says so and ends, so two launches at the same moment leave one viewer. The viewer ends when the machine stops. When the last window of a program closes the viewer stays, with no windows, and the next `guesthouse --app` for the machine finds it and reuses it.
+
+`apps NAME` lists the Start menu programs of a running Windows machine, one line each: the id, which is the shortcut's place in the menu, and the name. Uninstallers and help files are marked. Only programs with a Start menu shortcut are in it. The Store's Notepad and Calculator are not, and are started by name or path, such as `notepad.exe`.
+
+### Launcher entries
+
+`launcher NAME add PROGRAM` puts a program of the machine in this desktop's menu, as `Notepad (Office PC)`, with an entry that runs `guesthouse --app`. PROGRAM is the id or the name of a Start menu program, which also gives the entry the program's icon, or else a path or name in the guest, which has none. A machine that is off cannot be asked, so there PROGRAM is taken as a path or name, and the command says so; add it again with the machine running to get the Start menu's name and icon. `list` shows the entries and `remove PROGRAM` takes one away, by its name, its program or its id.
+
+The entries are `guesthouse-ID-PROGRAM.desktop` in `$XDG_DATA_HOME/applications` (`~/.local/share/applications`) and the icons are in `$XDG_DATA_HOME/icons/hicolor/48x48/apps`. Nothing is written anywhere else, and what the guest says of a program cannot make a file name or a second line in an entry. Removing a machine, in the app or with `remove`, removes its entries and their icons, and no other machine's.
+
+The file's name is also the app id that the program's windows carry in the viewer, so the desktop's task bar puts the windows of one program under one entry, with that entry's name and icon. A program that has no entry of the user's gets a hidden one (`NoDisplay=true`) written by the viewer, which has the same effect and does not show in the menu. A program that has no Start menu shortcut has no icon yet.
 
 ## Making a machine
 
@@ -122,9 +152,10 @@ A Windows machine gets Remote Desktop and no SSH, as the dialog starts it. `--re
 | `share` | a folder, or `none` | not Ubuntu |
 | `auto-snapshot` | on or off: whether a start takes a snapshot first when it has a risky change to make | Windows |
 | `remote-desktop` | on or off | Windows |
+| `app-windows` | on or off: whether the machine gets a way in for the app windows helper, and the commands `windows` and `app` work. It counts from the next start. | Windows |
 | `ssh` | on or off | Windows |
 
-These are the settings pages' own checks, and a running machine refuses what the page greys out, which is all of them except `screen`, `refresh`, `window-speed`, `dlss`, `remote-desktop` and `ssh`. The first two take effect at once if Windows is up on the display driver, as they do in the app, and `window-speed` and `dlss` at the next start. `remote-desktop` and `ssh` reach Windows at once if it's running, and `set` waits for that and says how it went. Otherwise they reach it at the next start, or at the install of a machine that hasn't been installed yet. Everything else in a machine's settings is still the app's, such as HDR, V-Cache pinning, the clipboard, USB devices and snapshots.
+These are the settings pages' own checks, and a running machine refuses what the page greys out, which is all of them except `screen`, `refresh`, `window-speed`, `dlss`, `remote-desktop`, `ssh` and `app-windows`. `app-windows` can be changed at any time, and a running machine has it from its next start. The first two take effect at once if Windows is up on the display driver, as they do in the app, and `window-speed` and `dlss` at the next start. `remote-desktop` and `ssh` reach Windows at once if it's running, and `set` waits for that and says how it went. Otherwise they reach it at the next start, or at the install of a machine that hasn't been installed yet. Everything else in a machine's settings is still the app's, such as HDR, V-Cache pinning, the clipboard, USB devices and snapshots.
 
 `auto-snapshot` can be changed at any time, and it counts from the next start. A machine that was never told is off, and `show` says which. A throwaway takes none, whatever it says, and `show` says so.
 

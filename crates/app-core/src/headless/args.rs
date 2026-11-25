@@ -29,6 +29,8 @@ const NEW_OPTIONS: [&str; 16] = [
 ];
 const SETUP_OPTIONS: [&str; 2] = ["--driver", "--card"];
 const MINUTES: &str = "--minutes";
+const JSON: &str = "--json";
+const START_MENU: &str = "--start-menu";
 
 /// What `new` was told. Whatever it wasn't told, the New Machine dialog's choice stands.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -101,6 +103,25 @@ pub(super) enum Command<'a> {
     Idle {
         name: &'a str,
         minutes: Option<&'a str>,
+    },
+    /// The cells of a running Windows guest's app windows. `json` is the helper's own layout, not lines.
+    Windows {
+        name: &'a str,
+        json: bool,
+    },
+    /// Starts a program of the guest, by its path in the guest.
+    App {
+        name: &'a str,
+        program: &'a str,
+        start_menu: bool,
+    },
+    /// The Start menu's programs of a running Windows guest.
+    Apps(&'a str),
+    /// The launcher entries of a machine. `program` is what `add` and `remove` are given.
+    Launcher {
+        name: &'a str,
+        action: &'a str,
+        program: Option<&'a str>,
     },
     New {
         name: &'a str,
@@ -249,6 +270,40 @@ pub(super) fn parse(arguments: &[String]) -> std::result::Result<Command<'_>, Pr
         "idle" => {
             let split = Split::new(command, rest, &[MINUTES], &[])?;
             Ok(Command::Idle { name: split.exactly(command, machine, 1)?[0], minutes: split.value(MINUTES) })
+        }
+        "windows" => {
+            let split = Split::new(command, rest, &[], &[JSON])?;
+            Ok(Command::Windows { name: split.exactly(command, machine, 1)?[0], json: split.has(JSON) })
+        }
+        "app" => {
+            let split = Split::new(command, rest, &[], &[START_MENU])?;
+            let [name, program] = split.exactly(command, "a machine and a program", 2)? else {
+                unreachable!("exactly two words")
+            };
+            Ok(Command::App { name, program, start_menu: split.has(START_MENU) })
+        }
+        "apps" => {
+            let split = Split::new(command, rest, &[], &[])?;
+            Ok(Command::Apps(split.exactly(command, machine, 1)?[0]))
+        }
+        "launcher" => {
+            let split = Split::new(command, rest, &[], &[])?;
+            let words = &split.words;
+            let (name, action) = match words[..] {
+                [name, action] | [name, action, _] => (name, action),
+                _ => return Err(mistake("launcher needs a machine and list, add or remove.")),
+            };
+            match (action, words.get(2).copied()) {
+                ("list", None) => Ok(Command::Launcher { name, action, program: None }),
+                ("list", Some(_)) => Err(mistake("launcher list takes no program.")),
+                ("add" | "remove", Some(program)) => {
+                    Ok(Command::Launcher { name, action, program: Some(program) })
+                }
+                ("add" | "remove", None) => Err(mistake(format!("launcher {action} needs a program."))),
+                (other, _) => {
+                    Err(mistake(format!("launcher has no action {other}. It has list, add and remove.")))
+                }
+            }
         }
         "start" | "install" => {
             let split = Split::new(command, rest, &[], &[NO_WAIT])?;

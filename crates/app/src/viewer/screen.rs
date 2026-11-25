@@ -40,6 +40,12 @@ const STYLE: &str = ".guest-screen { background: #000000; color: #ffffff; }
 .performance-overlay { background: rgba(0, 0, 0, 0.65); color: white; padding: 6px 10px; border-radius: 6px;
   font-size: smaller; font-feature-settings: \"tnum\"; }";
 
+/// App windows: what is done with each frame, as its slot, and on each look whether one came or not.
+pub(super) struct SlotHandler {
+    pub frame: Box<dyn Fn(HeldFrame, Option<u32>)>,
+    pub tick: Box<dyn Fn()>,
+}
+
 pub(super) struct Inner {
     pub(super) root: gtk::Overlay,
     pub(super) picture: gtk::Picture,
@@ -114,6 +120,10 @@ pub(super) struct Inner {
     /// The frame GTK is showing because the own surface couldn't take it yet, to hand over once it can.
     pub(super) handover: RefCell<Option<HeldFrame>>,
     pub(super) followed_at: Cell<Instant>,
+    /// App windows: this screen has no window of its own. It only owns the frames and the input, and
+    /// hands each frame to whoever asked for them.
+    pub(super) headless: Cell<bool>,
+    pub(super) on_slots: RefCell<Option<SlotHandler>>,
 }
 
 #[derive(Clone)]
@@ -212,6 +222,8 @@ impl Screen {
             handover: RefCell::default(),
             on_own_surface: RefCell::default(),
             followed_at: Cell::new(Instant::now()),
+            headless: Cell::new(false),
+            on_slots: RefCell::default(),
         }));
         this.add_input();
         this.connect_life();
@@ -339,7 +351,9 @@ impl Screen {
         if let Some(guest) = self.0.guest.borrow_mut().as_mut() {
             guest.flush();
         }
-        if !self.show_on_own_surface() {
+        if self.0.headless.get() {
+            self.pass_on_slot();
+        } else if !self.show_on_own_surface() {
             if !self.0.waiting.get() {
                 if let Some(texture) = self.next_texture() {
                     self.show(texture);
@@ -459,6 +473,66 @@ impl Screen {
             self.0.frames.set(self.0.frames.get() + 1);
         }
         *self.0.latest.borrow_mut() = Some(texture);
+    }
+
+    /// App windows: makes this screen the owner of the machine's frames and input for windows of
+    /// other widgets. It is never in a window. Every frame goes to `frame` as its slot, as it comes,
+    /// for the windows to hand to the compositor themselves: nothing here draws it. `tick` is called
+    /// on every look, so what the compositor gave back is taken in soon.
+    pub fn start_headless(
+        &self,
+        frame: impl Fn(HeldFrame, Option<u32>) + 'static,
+        tick: impl Fn() + 'static,
+    ) {
+        self.0.headless.set(true);
+        self.0.own_impossible.set(true);
+        self.0.direct_frames.set(false);
+        *self.0.on_slots.borrow_mut() = Some(SlotHandler { frame: Box::new(frame), tick: Box::new(tick) });
+        if self.0.poll_source.borrow().is_some() {
+            return;
+        }
+        let this = self.clone();
+        let source = glib::timeout_add_local(POLL, move || {
+            this.poll();
+            glib::ControlFlow::Continue
+        });
+        *self.0.poll_source.borrow_mut() = Some(source);
+    }
+
+    /// App windows: the newest frame as its slot, to whoever asked for them.
+    fn pass_on_slot(&self) {
+        let newest = {
+            let mut gpu = self.0.gpu.borrow_mut();
+            gpu.as_mut().map(|source| (source.newest_slot(), source.sdr_white_nits()))
+        };
+        self.follow_gpu_cursor();
+        let handler = self.0.on_slots.borrow();
+        let Some(handler) = handler.as_ref() else { return };
+        if let Some((Some(frame), sdr_white_nits)) = newest {
+            self.0.booting.set(false);
+            self.0.frames.set(self.0.frames.get() + 1);
+            (handler.frame)(HeldFrame::new(frame), sdr_white_nits);
+        }
+        (handler.tick)();
+    }
+
+    /// The pointer the guest wants over its screen, for a window that shows part of it.
+    pub fn guest_pointer_cursor(&self) -> Option<gdk::Cursor> {
+        self.0.picture.cursor()
+    }
+
+    /// Lets go of what is held in the guest, and stops following the machine.
+    pub fn end_headless(&self) {
+        self.let_go();
+        if let Some(source) = self.0.poll_source.borrow_mut().take() {
+            source.remove();
+        }
+        *self.0.on_slots.borrow_mut() = None;
+        self.close_guest();
+        self.0.gpu.borrow_mut().take();
+        self.0.qemu.borrow_mut().take();
+        self.0.forwarded.borrow_mut().take();
+        self.0.latest.borrow_mut().take();
     }
 
     /// The newest frame as a small PNG, or `None` if nothing has been shown.

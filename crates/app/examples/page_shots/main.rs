@@ -3,6 +3,7 @@
 //!
 //! Usage: `page_shots FOLDER`, with the store and the XDG folders already pointing somewhere harmless.
 
+mod apps_pages;
 mod fake_display;
 mod fake_forwarded;
 mod fake_frames;
@@ -88,13 +89,12 @@ fn text_of(window: &Window) -> String {
         .join("\n")
 }
 
-fn shot(window: &Window, folder: &Path, name: &str) {
-    let widget = window.widget();
+fn shot_of(widget: &gtk::Widget, folder: &Path, name: &str) {
     let paintable = gtk::WidgetPaintable::new(Some(widget));
     let snapshot = gtk::Snapshot::new();
     paintable.snapshot(&snapshot, f64::from(widget.width()), f64::from(widget.height()));
     let Some(node) = snapshot.to_node() else { return };
-    let Some(renderer) = widget.renderer() else { return };
+    let Some(renderer) = widget.native().and_then(|native| native.renderer()) else { return };
     let texture = renderer.render_texture(node, None);
     let path = folder.join(format!("{name}.png"));
     println!("shot {name}: {}", texture.save_to_png(&path).is_ok());
@@ -114,13 +114,17 @@ async fn shows(window: &Window, text: &str) -> bool {
 }
 
 async fn shot_after_paint(window: &Window, folder: &Path, name: &str) {
-    let Some(clock) = window.widget().frame_clock() else { return };
-    let painted = window.widget().clone();
+    shot_after_paint_of(window.widget().upcast_ref(), folder, name).await;
+}
+
+async fn shot_after_paint_of(widget: &gtk::Widget, folder: &Path, name: &str) {
+    let Some(clock) = widget.frame_clock() else { return };
+    let painted = widget.clone();
     let (taken, wait) = async_channel::bounded::<()>(1);
-    let (window, folder, name) = (window.clone(), folder.to_owned(), name.to_owned());
+    let (widget, folder, name) = (widget.clone(), folder.to_owned(), name.to_owned());
     let handler = clock.connect_after_paint(move |_| {
         if !taken.is_full() {
-            shot(&window, &folder, &name);
+            shot_of(&widget, &folder, &name);
             let _ = taken.try_send(());
         }
     });
@@ -762,6 +766,10 @@ fn main() -> glib::ExitCode {
     // This program lives in `examples`, one folder below the app's own.
     let examples = env::current_exe().unwrap().parent().unwrap().to_owned();
     context.paths.binaries = examples.parent().unwrap().to_owned();
+    let apps_only = env::var("PAGE_SHOTS_WALK").is_ok_and(|walk| walk == "apps");
+    if apps_only {
+        apps_pages::prepare(&mut context, &folder);
+    }
     let context = Arc::new(context);
     let walking = context.clone();
     application(context, None, move |window| {
@@ -770,7 +778,11 @@ fn main() -> glib::ExitCode {
         if let Some(settings) = gtk::Settings::default() {
             settings.set_gtk_enable_animations(false);
         }
-        glib::spawn_future_local(walk_pages(window.clone(), walking.clone(), folder.clone()));
+        if apps_only {
+            glib::spawn_future_local(apps_pages::walk(window.clone(), walking.clone(), folder.clone()));
+        } else {
+            glib::spawn_future_local(walk_pages(window.clone(), walking.clone(), folder.clone()));
+        }
     })
     .run_with_args::<&str>(&[])
 }

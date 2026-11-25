@@ -5,9 +5,12 @@
 use std::fs;
 use std::path::PathBuf;
 
-const SENT_TO_THE_GUEST: [&str; 32] = [
+const SENT_TO_THE_GUEST: [&str; 35] = [
     "SetupComplete.cmd",
     "agent.ps1",
+    "app-windows-start.ps1",
+    "app-windows.cs",
+    "app-windows.ps1",
     "api-check.ps1",
     "autounattend.xml",
     "check.ps1",
@@ -117,6 +120,30 @@ fn the_files_helper_only_answers_the_host() {
     assert!(helper.contains("words[0] != token) return;"));
 }
 
+/// The helper for app windows listens on the guest's network too, so the firewall rule and the helper
+/// keep it to the host's end of QEMU's private link, and only a caller that sends the token gets in.
+/// Nothing else gets in, not a program on the guest itself, whatever token it has read. A caller that is
+/// not the host is closed before it is read from, and only a few that have not sent their token wait at once.
+#[test]
+fn the_app_windows_helper_only_answers_the_host() {
+    let start = fs::read_to_string(guest_file("app-windows-start.ps1")).unwrap();
+    let rules: Vec<&str> = start.lines().filter(|line| line.contains("New-NetFirewallRule")).collect();
+    assert_eq!(rules.len(), 1, "{rules:?}");
+    assert!(rules[0].contains("-LocalPort 8769 -RemoteAddress 10.0.2.2"), "{}", rules[0]);
+    let helper = fs::read_to_string(guest_file("app-windows.cs")).unwrap();
+    assert!(helper.contains("const string HostAddress = \"10.0.2.2\";"));
+    assert!(helper.contains("if (from.ToString() != HostAddress) return;"));
+    assert!(!helper.contains("IsLoopback"), "a program in the guest is not let in");
+    assert!(
+        helper.contains("ReadLine(stream, TokenMaxBytes, TokenWaitMs)"),
+        "the token line has one deadline"
+    );
+    assert!(helper.contains("> UnauthenticatedMax"), "connections that have not sent the token are capped");
+    assert!(helper.contains("if (first != token) return;"));
+    let runner = fs::read_to_string(guest_file("app-windows.ps1")).unwrap();
+    assert!(runner.contains("Get-Content C:\\gpupv\\token.txt"));
+}
+
 /// A helper's task runs conhost, and stopping the task leaves the PowerShell under it holding the
 /// helper's port. The next helper then can't listen, and a loop that went on would keep a core busy.
 #[test]
@@ -129,7 +156,14 @@ fn a_stopped_helper_leaves_no_powershell_and_one_that_cannot_listen_leaves() {
         assert!(text.contains("try { $listener.Start() } catch { exit 1 }"), "{helper}");
         assert!(text.contains("try { $client = $listener.AcceptTcpClient() } catch { exit 1 }"), "{helper}");
     }
-    for name in ["clipboard", "files", "window-size"] {
+    let windows = fs::read_to_string(guest_file("app-windows.cs")).unwrap();
+    assert!(
+        windows.contains(
+            "try { listener.Start(); } catch (Exception ex) { LogError(ex); Environment.Exit(1); }"
+        )
+    );
+    assert!(windows.contains("try { client = listener.AcceptTcpClient(); } catch (Exception ex) { LogError(ex); Environment.Exit(1); return; }"));
+    for name in ["clipboard", "files", "window-size", "app-windows"] {
         let start = fs::read_to_string(guest_file(&format!("{name}-start.ps1"))).unwrap();
         assert!(start.contains(&format!("-File C:\\gpupv\\{name}.ps1")), "the stop finds it by this: {name}");
     }

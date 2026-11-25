@@ -42,7 +42,17 @@ pub fn forward_problem(
 ) -> Option<String> {
     let lowest = network::lowest_free_port();
     let windows = machine.kind == Kind::Windows;
-    network::forward_problem(item, &reserved_ports(context), windows, lowest).or_else(|| {
+    let mut reserved = reserved_ports(context);
+    // Only a machine with app windows on has its helper's port, so for every other the ports are as free as
+    // they always were.
+    let uses_helper = |machine: &Machine| crate::app_windows::is_on(context, machine);
+    if uses_helper(machine) || others.iter().any(uses_helper) {
+        for slot in slots::all() {
+            let port = crate::app_windows::host_port_of(slot).into();
+            reserved.insert(port, "the port Guesthouse reaches a VM's app windows helper on".to_owned());
+        }
+    }
+    network::forward_problem(item, &reserved, windows, lowest).or_else(|| {
         let others: Vec<(&str, &[Forward])> =
             others.iter().map(|other| (other.name.as_str(), other.forwards.as_slice())).collect();
         let name = network::forward_clash(item, &others)?;
@@ -376,5 +386,19 @@ mod tests {
         let context = scratch_context(&scratch);
         let reserved = reserved_ports(&context);
         assert!(slots::all().all(|slot| reserved.contains_key(&slot.agent_port().into())));
+    }
+
+    #[test]
+    fn the_app_windows_ports_are_reserved_only_beside_a_machine_that_has_it_on() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let machine = Machine::new("win", "Win", "/d", "/v");
+        machine.save(&context).unwrap();
+        let port = u32::from(crate::app_windows::host_port_of(slots::first()));
+        let forward = Forward { protocol: Protocol::Tcp, host: port, guest: 80 };
+        assert_eq!(forward_problem(&context, &machine, &forward, &[]), None, "as on main");
+        crate::app_windows::set_on(&context, &machine, true).unwrap();
+        let problem = forward_problem(&context, &machine, &forward, &[]).unwrap();
+        assert!(problem.contains("app windows helper"), "{problem}");
     }
 }

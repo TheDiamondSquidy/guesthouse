@@ -9,6 +9,8 @@
 //! Like the pointer lock, this lives on GTK's own connection with a queue of its own. GTK goes on
 //! reading the socket for everyone, and `catch_up` takes in what landed on this queue.
 
+use super::buffer_holds::BufferHolds;
+use super::crop::Crop;
 use super::dmabuf_feedback::{self, Reading};
 use super::frames::SlotFrame;
 pub use super::stall::Stall;
@@ -18,8 +20,8 @@ use gdk_wayland::{WaylandDisplay, WaylandSurface};
 use gtk::gdk;
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
-use std::sync::OnceLock;
 use std::time::Instant;
+use wayland_client::backend::ObjectId;
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_compositor::WlCompositor;
@@ -68,6 +70,8 @@ const COLOUR_VERSION: u32 = 1;
 pub(super) const PQ_TRANSFER: u8 = 16;
 const BT2020_PRIMARIES: u8 = 9;
 const SINGLE_PLANE: u32 = 0;
+/// What `wp_viewport.set_source` takes to show the whole buffer again.
+const WHOLE_BUFFER: f64 = -1.0;
 /// PQ's own reference white, for a guest that hasn't said where its SDR white is.
 const PQ_REFERENCE_NITS: u32 = 203;
 /// The darkest a PQ signal goes, in the protocol's units of 0.0001 cd/m². Its peak is fixed at
@@ -86,8 +90,9 @@ enum Described {
     Preferred,
 }
 
-/// Why the surface didn't show a frame, which goes to GTK instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why the surface didn't show a frame. The guest's screen then has GTK show it; an app window, whose
+/// picture GTK never draws, shows nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotShown {
     NotPlaced,
     PeakNotKnown,
@@ -127,19 +132,40 @@ fn slot_name((generation, slot): SlotKey) -> String {
     format!("slot {slot} of ring {generation}")
 }
 
-/// A buffer's slot. The compositor makes the buffer before it's known whose it is, so the slot is
-/// filled in when the buffer arrives.
-type BufferSlot = OnceLock<SlotKey>;
+/// The part of a frame a buffer is cut to, as x, y, width and height in its pixels: the buffer starts at
+/// that pixel of the slot (its plane's offset) and is that large, so the compositor is given no
+/// source rectangle away from the buffer's corner. `None` for a buffer of the whole frame.
+type Window = Option<(i32, i32, i32, i32)>;
+/// A buffer: its slot, and the part of the frame it is cut to.
+type BufferKey = (SlotKey, Window);
+
+/// The bytes a pixel takes in the single-plane formats a buffer can be cut from by its offset.
+fn pixel_bytes(fourcc: u32) -> Option<u32> {
+    match &fourcc.to_le_bytes() {
+        b"XR24" | b"AR24" | b"XB24" | b"AB24" | b"RX24" | b"RA24" | b"BX24" | b"BA24" | b"XR30" | b"AR30"
+        | b"XB30" | b"AB30" => Some(4),
+        b"XR4H" | b"AR4H" | b"XB4H" | b"AB4H" => Some(8),
+        _ => None,
+    }
+}
+
+/// DRM's modifier for rows one after another, the only layout whose pixel's place is offset + y * stride
+/// + x * bytes.
+const LINEAR: u64 = 0;
+/// The boundary a cut buffer's start is put on.
+const CUT_ALIGNMENT: u64 = 256;
 
 /// What the compositor has said, gathered while GTK reads.
 #[derive(Default)]
 struct Events {
-    /// The slots each buffer still holds for the compositor, given back on `release`.
-    held: HashMap<SlotKey, Box<dyn FnOnce() + Send>>,
-    /// Slots whose buffer the compositor refused, so their frames go to GTK instead.
-    refused: Vec<SlotKey>,
+    /// The slots each buffer still holds for the compositor, given back on its `release`, and the
+    /// buffers no longer wanted that wait for it.
+    holds: BufferHolds<ObjectId, WlBuffer>,
+    /// Buffers the compositor refused: a slot's whole frame (its frames go to GTK instead), or a cut
+    /// one (cut buffers are not asked for again).
+    refused: Vec<BufferKey>,
     /// Buffers the compositor has made, not yet taken in.
-    made: Vec<(SlotKey, WlBuffer)>,
+    made: Vec<(BufferKey, WlBuffer)>,
     /// The PQ descriptions the compositor has made, or couldn't.
     ready: HashSet<PqKey>,
     failed: HashSet<PqKey>,
@@ -336,20 +362,19 @@ impl Dispatch<ZwpLinuxDmabufFeedbackV1, ()> for Events {
     }
 }
 
-impl Dispatch<WlBuffer, BufferSlot> for Events {
+impl Dispatch<WlBuffer, ()> for Events {
     fn event(
         events: &mut Self,
-        _: &WlBuffer,
+        buffer: &WlBuffer,
         event: wl_buffer::Event,
-        slot: &BufferSlot,
+        _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let wl_buffer::Event::Release = event
-            && let Some(key) = slot.get()
-            && let Some(release) = events.held.remove(key)
+            && let Some(retired) = events.holds.released(&buffer.id())
         {
-            release();
+            retired.destroy();
         }
     }
 }
@@ -357,28 +382,30 @@ impl Dispatch<WlBuffer, BufferSlot> for Events {
 /// The compositor's answer to a buffer asked for with `create`. A refusal only sends that slot's
 /// frames to GTK. `create_immed` would make a refusal a protocol error, which ends the connection
 /// GTK shares with this: GNOME refuses NVIDIA's 10-bit frames in rows that way.
-impl Dispatch<ZwpLinuxBufferParamsV1, SlotKey> for Events {
+impl Dispatch<ZwpLinuxBufferParamsV1, BufferKey> for Events {
     fn event(
         events: &mut Self,
         params: &ZwpLinuxBufferParamsV1,
         event: zwp_linux_buffer_params_v1::Event,
-        key: &SlotKey,
+        key: &BufferKey,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         match event {
             zwp_linux_buffer_params_v1::Event::Created { buffer } => {
-                if let Some(slot) = buffer.data::<BufferSlot>() {
-                    let _ = slot.set(*key);
-                }
-                events
-                    .notes
-                    .push(format!("own surface: the compositor made the buffer of {}", slot_name(*key)));
+                let name = slot_name(key.0);
+                events.notes.push(format!(
+                    "own surface: the compositor made the buffer of {name} cut to {:?}",
+                    key.1
+                ));
                 events.made.push((*key, buffer));
             }
             zwp_linux_buffer_params_v1::Event::Failed => {
-                let refused = slot_name(*key);
-                events.notes.push(format!("own surface: the compositor refused the buffer of {refused}"));
+                let refused = slot_name(key.0);
+                events.notes.push(format!(
+                    "own surface: the compositor refused the buffer of {refused} cut to {:?}",
+                    key.1
+                ));
                 events.refused.push(*key);
             }
             _ => return,
@@ -387,7 +414,7 @@ impl Dispatch<ZwpLinuxBufferParamsV1, SlotKey> for Events {
     }
 
     wayland_client::event_created_child!(Events, ZwpLinuxBufferParamsV1, [
-        zwp_linux_buffer_params_v1::EVT_CREATED_OPCODE => (WlBuffer, BufferSlot::new()),
+        zwp_linux_buffer_params_v1::EVT_CREATED_OPCODE => (WlBuffer, ()),
     ]);
 }
 
@@ -447,9 +474,15 @@ pub struct OwnSurface {
     feedback: Option<WpColorManagementSurfaceFeedbackV1>,
     /// PQ in BT.2020, one for each reference white and screen peak used.
     descriptions: HashMap<PqKey, WpImageDescriptionV1>,
-    buffers: HashMap<SlotKey, WlBuffer>,
-    /// Slots whose buffer has been asked for, made or not.
-    asked: HashSet<SlotKey>,
+    buffers: HashMap<BufferKey, WlBuffer>,
+    /// Buffers asked for, made or not.
+    asked: HashSet<BufferKey>,
+    /// Whether frames go on buffers cut to the crop by their offset (`set_cut_buffers`), and whether
+    /// the compositor refused one, which leaves the viewport's source to do the cutting.
+    cut_buffers: bool,
+    cut_refused: bool,
+    /// The buffer on the surface, and the size of its frame.
+    attached_key: Option<(BufferKey, (i32, i32))>,
     /// Which ring the buffers are of. A new one makes them all stale.
     generation: Option<u32>,
     /// The PQ description on the surface, or `None` for plain sRGB.
@@ -459,23 +492,50 @@ pub struct OwnSurface {
     place: Option<(i32, i32, i32, i32)>,
     /// Whether the frames sent reach the screen.
     stall: StallWatch,
+    /// The rectangle of each frame to show, as it was asked for: a program window's cell of the guest's screen.
+    crop: Option<Crop>,
+    /// The viewport's source now: the rectangle as it fits the buffer, or `None` for all of it.
+    source: Option<Crop>,
+    /// The size of the buffer on the surface, while there is one.
+    attached: Option<(i32, i32)>,
+    /// The viewport's source is the whole buffer, as set for a cut buffer.
+    whole_source: bool,
 }
 
 impl OwnSurface {
     /// Under `parent`, which must be a Wayland toplevel. `None` if this isn't Wayland or the
     /// compositor lacks something this needs.
     pub fn new(display: &gdk::Display, parent: &gdk::Surface) -> Option<Self> {
-        let display = display.downcast_ref::<WaylandDisplay>()?;
-        let parent = parent.downcast_ref::<WaylandSurface>()?.wl_surface()?;
-        let backend = display.wl_display()?.backend().upgrade()?;
+        Self::made(display, parent, false).ok()
+    }
+
+    /// Over `parent`, a toplevel or a popup, for a window whose whole picture this is: GTK draws
+    /// nothing there that has to stay on top, so its surface needs no clear part over the picture.
+    /// When it can't be made, says why, for the user.
+    pub fn new_above(display: &gdk::Display, parent: &gdk::Surface) -> Result<Self, &'static str> {
+        Self::made(display, parent, true)
+    }
+
+    fn made(display: &gdk::Display, parent: &gdk::Surface, above: bool) -> Result<Self, &'static str> {
+        const NOT_WAYLAND: &str = "the desktop isn't a Wayland one";
+        let display = display.downcast_ref::<WaylandDisplay>().ok_or(NOT_WAYLAND)?;
+        let parent = parent.downcast_ref::<WaylandSurface>().and_then(|parent| parent.wl_surface());
+        let parent = parent.ok_or("the window has no Wayland surface")?;
+        let backend =
+            display.wl_display().and_then(|display| display.backend().upgrade()).ok_or(NOT_WAYLAND)?;
         let connection = Connection::from_backend(backend);
-        let (globals, mut queue) = registry_queue_init::<Events>(&connection).ok()?;
+        let lost = "the connection to the desktop failed";
+        let (globals, mut queue) = registry_queue_init::<Events>(&connection).map_err(|_| lost)?;
         let handle = queue.handle();
-        let compositor: WlCompositor = bind(&globals, &handle, COMPOSITOR_VERSION)?;
-        let subcompositor: WlSubcompositor = bind(&globals, &handle, 1)?;
-        let viewporter: WpViewporter = bind(&globals, &handle, 1)?;
-        let dmabuf: ZwpLinuxDmabufV1 =
-            globals.bind(&handle, DMABUF_VERSION..=DMABUF_FEEDBACK_VERSION, ()).ok()?;
+        let compositor: WlCompositor = bind(&globals, &handle, COMPOSITOR_VERSION)
+            .ok_or("the desktop doesn't offer wl_compositor version 4")?;
+        let subcompositor: WlSubcompositor =
+            bind(&globals, &handle, 1).ok_or("the desktop doesn't offer subsurfaces (wl_subcompositor)")?;
+        let viewporter: WpViewporter =
+            bind(&globals, &handle, 1).ok_or("the desktop doesn't offer wp_viewporter")?;
+        let dmabuf: ZwpLinuxDmabufV1 = globals
+            .bind(&handle, DMABUF_VERSION..=DMABUF_FEEDBACK_VERSION, ())
+            .map_err(|_| "the desktop doesn't offer linux-dmabuf version 3 or later")?;
         let presentation: Option<WpPresentation> = bind(&globals, &handle, 1);
         let manager: Option<WpColorManagerV1> = bind(&globals, &handle, COLOUR_VERSION);
 
@@ -488,13 +548,17 @@ impl OwnSurface {
         subsurface.set_desync();
         // Under the window, which leaves the picture's place clear while this shows frames. What GTK
         // draws over the screen, like the overlay, toasts and the captured cursor, stays on top.
-        subsurface.place_below(&parent);
+        if above {
+            subsurface.place_above(&parent);
+        } else {
+            subsurface.place_below(&parent);
+        }
         let viewport = viewporter.get_viewport(&surface, &handle, ());
         let dmabuf_feedback = (dmabuf.version() >= DMABUF_FEEDBACK_VERSION)
             .then(|| dmabuf.get_surface_feedback(&surface, &handle, ()));
         let mut events = Events::default();
         // The manager says what it offers before the description is asked for.
-        queue.roundtrip(&mut events).ok()?;
+        queue.roundtrip(&mut events).map_err(|_| lost)?;
         events.notes.push(format!(
             "own surface: started. The compositor's colour management: {}, PQ {}, parametric {}, \
              luminances {}, mastering {}",
@@ -511,7 +575,7 @@ impl OwnSurface {
             feedback.get_preferred(&handle, Described::Preferred);
             feedback
         });
-        Some(Self {
+        Ok(Self {
             queue,
             events,
             dmabuf,
@@ -527,11 +591,18 @@ impl OwnSurface {
             descriptions: HashMap::new(),
             buffers: HashMap::new(),
             asked: HashSet::new(),
+            cut_buffers: false,
+            cut_refused: false,
+            attached_key: None,
             generation: None,
             showing: None,
             last_reference: None,
             place: None,
             stall: StallWatch::default(),
+            crop: None,
+            source: None,
+            whole_source: false,
+            attached: None,
         })
     }
 
@@ -582,6 +653,77 @@ impl OwnSurface {
         true
     }
 
+    /// Cuts each frame to the crop by the buffer's own start and size (its plane's offset) instead of
+    /// the viewport's source rectangle, for frames whose layout allows it (linear rows of one plane).
+    /// No copy either way. A compositor that draws a viewport's source away from the buffer's corner
+    /// wrongly (COSMIC 1.11 cuts the picture short by twice the source's offset, measured) shows the
+    /// frame right this way; a compositor that refuses such a buffer gets the source rectangle again.
+    pub fn set_cut_buffers(&mut self, on: bool) {
+        self.cut_buffers = on;
+    }
+
+    /// Shows just this rectangle of each frame, or all of it with `None`. A frame already up
+    /// is cut to it at once, as a still guest may send no other for a long time. Says whether the
+    /// frame up has to be shown again to be cut to it (a buffer cut by its offset).
+    pub fn set_crop(&mut self, crop: Option<Crop>) -> bool {
+        self.crop = crop;
+        if let Some(((_, Some(window)), frame_size)) = self.attached_key {
+            let now = crop.and_then(|crop| crop.within(frame_size)).map(|c| (c.x, c.y, c.width, c.height));
+            return now != Some(window);
+        }
+        if let Some(size) = self.attached
+            && self.cut_to(size)
+        {
+            self.surface.commit();
+            let _ = self.queue.flush();
+        }
+        false
+    }
+
+    /// The part of this frame its buffer is to be cut to by its offset, if it is to be.
+    fn window_for(&self, frame: &SlotFrame) -> Window {
+        let descriptor = frame.descriptor;
+        if !self.cut_buffers || self.cut_refused || descriptor.format.modifier != LINEAR {
+            return None;
+        }
+        let bytes = pixel_bytes(descriptor.format.fourcc)?;
+        let crop = self.crop?.within((descriptor.width as i32, descriptor.height as i32))?;
+        // GPUs take a buffer's start on a boundary of 256 bytes (measured: Mesa's radeonsi refused
+        // every other one under mutter and COSMIC); a cell that does not start on one is cut by the
+        // viewport's source instead.
+        let offset = u64::from(descriptor.offset as u32)
+            + crop.y as u64 * u64::from(descriptor.stride)
+            + crop.x as u64 * u64::from(bytes);
+        // The compositor takes the plane to run stride x height from its start, which must stay
+        // inside the frame's own (a cell at the bottom right would reach past it by its x).
+        let stride = u64::from(descriptor.stride);
+        let end = offset + stride * crop.height as u64;
+        let frame_end = u64::from(descriptor.offset as u32) + stride * u64::from(descriptor.height);
+        (offset.is_multiple_of(CUT_ALIGNMENT) && end <= frame_end).then_some((
+            crop.x,
+            crop.y,
+            crop.width,
+            crop.height,
+        ))
+    }
+
+    /// Sets the viewport's source for a buffer of this size, and says if it changed. It has to lie
+    /// inside the buffer, or the compositor ends the connection, and that is GTK's as well.
+    fn cut_to(&mut self, (width, height): (i32, i32)) -> bool {
+        let source = self.crop.and_then(|crop| crop.within((width, height)));
+        if source == self.source {
+            return false;
+        }
+        match source {
+            Some(Crop { x, y, width, height }) => {
+                self.viewport.set_source(f64::from(x), f64::from(y), f64::from(width), f64::from(height))
+            }
+            None => self.viewport.set_source(WHOLE_BUFFER, WHOLE_BUFFER, WHOLE_BUFFER, WHOLE_BUFFER),
+        }
+        self.source = source;
+        true
+    }
+
     /// The PQ description for this reference white on this screen, once the compositor has made it.
     /// The first call asks for it.
     fn pq_description(&mut self, key: PqKey) -> Option<&WpImageDescriptionV1> {
@@ -615,8 +757,16 @@ impl OwnSurface {
     /// can't yet be told what it is. A frame that isn't shown gives its slot back here. `sdr_white_nits` is where the guest puts its SDR white in an HDR
     /// frame, if it has said.
     pub fn show(&mut self, frame: SlotFrame, sdr_white_nits: Option<u32>) -> Result<(), NotShown> {
-        let key = (frame.generation, frame.slot);
-        if self.events.refused.contains(&key) {
+        let slot_key = (frame.generation, frame.slot);
+        if self.events.refused.iter().any(|(slot, window)| window.is_some() && *slot == slot_key) {
+            if !self.cut_refused {
+                self.events.notes.push(
+                    "own surface: a buffer cut by its offset was refused, so the viewport cuts".to_owned(),
+                );
+            }
+            self.cut_refused = true;
+        }
+        if self.events.refused.contains(&(slot_key, None)) {
             return Err(NotShown::BufferRefused);
         }
         if self.place.is_none() {
@@ -644,16 +794,10 @@ impl OwnSurface {
             return Err(if failed { NotShown::DescriptionRefused } else { NotShown::DescriptionNotMade });
         }
         if self.generation != Some(frame.generation) {
-            for (_, buffer) in self.buffers.drain() {
-                buffer.destroy();
-            }
-            // A destroyed buffer hears no release, so its slot's file would stay open for good.
-            let older: Vec<SlotKey> =
-                self.events.held.keys().copied().filter(|key| key.0 != frame.generation).collect();
-            for key in older {
-                if let Some(release) = self.events.held.remove(&key) {
-                    release();
-                }
+            // The old ring's buffers the compositor may still show go when it lets go of them.
+            let old: Vec<WlBuffer> = self.buffers.drain().map(|(_, buffer)| buffer).collect();
+            for buffer in old {
+                self.retire(buffer);
             }
             self.asked.clear();
             self.events.refused.clear();
@@ -667,6 +811,11 @@ impl OwnSurface {
             self.events.notes.push(format!("own surface: frames are {layout}"));
         }
         self.take_made_buffers();
+        let window = self.window_for(&frame);
+        let key = (slot_key, window);
+        if window.is_some() {
+            self.drop_other_windows(window);
+        }
         let Some(buffer) = self.buffers.get(&key) else {
             if self.asked.insert(key) {
                 self.ask_for_buffer(&frame, key);
@@ -684,17 +833,32 @@ impl OwnSurface {
             }
             self.showing = wanted;
         }
+        let frame_size = (descriptor.width as i32, descriptor.height as i32);
+        let buffer_id = buffer.id();
         self.surface.attach(Some(buffer), 0, 0);
+        self.attached_key = Some((key, frame_size));
+        match window {
+            Some((_, _, width, height)) => {
+                // The buffer is the cut: all of it is shown.
+                self.attached = Some((width, height));
+                if self.source.take().is_some() || !self.whole_source {
+                    self.viewport.set_source(WHOLE_BUFFER, WHOLE_BUFFER, WHOLE_BUFFER, WHOLE_BUFFER);
+                    self.whole_source = true;
+                }
+            }
+            None => {
+                self.attached = Some(frame_size);
+                self.whole_source = false;
+                // In the same commit as the buffer, as a rectangle that fits it may not fit the last one.
+                self.cut_to(frame_size);
+            }
+        }
         self.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
         if let Some(presentation) = &self.presentation {
             presentation.feedback(&self.surface, &handle, ());
         }
-        // The slot was shown before, and is still the compositor's until it says otherwise. That
-        // can't happen, as the producer only sends a slot it has back, but a stale hold must not
-        // keep a slot forever.
-        if let Some(stale) = self.events.held.insert(key, frame.release) {
-            stale();
-        }
+        // The slot is the compositor's until it lets go of this buffer.
+        self.events.holds.hold(buffer_id, frame.release);
         self.surface.commit();
         let _ = self.queue.flush();
         // Only a compositor that says what it showed can be watched.
@@ -716,31 +880,59 @@ impl OwnSurface {
     }
 
     /// Asks the compositor for a buffer of this frame's slot. The answer comes back on the queue.
-    fn ask_for_buffer(&mut self, frame: &SlotFrame, key: SlotKey) {
+    fn ask_for_buffer(&mut self, frame: &SlotFrame, key: BufferKey) {
         let descriptor = frame.descriptor;
         let modifier = descriptor.format.modifier;
+        let bytes = pixel_bytes(descriptor.format.fourcc).unwrap_or(4);
+        let (offset, width, height) = match key.1 {
+            Some((x, y, width, height)) => {
+                (descriptor.offset as u32 + y as u32 * descriptor.stride + x as u32 * bytes, width, height)
+            }
+            None => (descriptor.offset as u32, descriptor.width as i32, descriptor.height as i32),
+        };
         let params = self.dmabuf.create_params(&self.queue.handle(), key);
         params.add(
             frame.file.as_fd(),
             SINGLE_PLANE,
-            descriptor.offset as u32,
+            offset,
             descriptor.stride,
             (modifier >> 32) as u32,
             modifier as u32,
         );
-        params.create(
-            descriptor.width as i32,
-            descriptor.height as i32,
-            descriptor.format.fourcc,
-            zwp_linux_buffer_params_v1::Flags::empty(),
-        );
+        params.create(width, height, descriptor.format.fourcc, zwp_linux_buffer_params_v1::Flags::empty());
         let _ = self.queue.flush();
+    }
+
+    /// Lets go of the buffers cut to another part of the frame than `window`, but the one on the
+    /// surface: a cell that moved or changed size has no use for them.
+    fn drop_other_windows(&mut self, window: Window) {
+        let up = self.attached_key.map(|(key, _)| key);
+        let stale: Vec<BufferKey> = self
+            .buffers
+            .keys()
+            .copied()
+            .filter(|key| key.1.is_some() && key.1 != window && Some(*key) != up)
+            .collect();
+        for key in stale {
+            if let Some(buffer) = self.buffers.remove(&key) {
+                self.retire(buffer);
+            }
+            self.asked.remove(&key);
+        }
+    }
+
+    /// Destroys a buffer no longer wanted, or, while it still holds a slot, leaves it to go on its
+    /// release: a destroyed buffer hears no release, and its slot would never go back.
+    fn retire(&mut self, buffer: WlBuffer) {
+        if let Some(buffer) = self.events.holds.retire(buffer.id(), buffer) {
+            buffer.destroy();
+        }
     }
 
     /// Keeps the buffers the compositor has made for this ring, and lets go of any for an older one.
     fn take_made_buffers(&mut self) {
         for (key, buffer) in self.events.made.drain(..) {
-            if Some(key.0) == self.generation {
+            if Some(key.0.0) == self.generation {
                 self.buffers.insert(key, buffer);
             } else {
                 buffer.destroy();
@@ -751,11 +943,14 @@ impl OwnSurface {
     /// Takes the picture off, and gives back every slot. The surface stays for the next frame.
     pub fn hide(&mut self) {
         self.surface.attach(None, 0, 0);
+        self.attached = None;
+        self.attached_key = None;
         self.surface.commit();
         let _ = self.queue.flush();
         self.stall.nothing_awaited();
-        for (_, release) in self.events.held.drain() {
-            release();
+        // Nothing is on the surface now, so nothing it shows can be given back.
+        for buffer in self.events.holds.release_all() {
+            buffer.destroy();
         }
     }
 }
