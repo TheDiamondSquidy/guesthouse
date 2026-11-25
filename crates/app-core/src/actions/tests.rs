@@ -1181,3 +1181,27 @@ fn a_machine_that_may_have_the_whole_card_is_started_with_it_as_its_cap() {
     machine.vram_gib = 5;
     assert_eq!(vram(&machine), Some("5G".to_owned()), "its own cap is as typed");
 }
+
+#[test]
+fn pinning_each_vcpu_gives_every_vcpu_a_cpu_of_its_own_a_core_at_a_time() {
+    let scratch = Scratch::new();
+    let mut context = scratch_context(&scratch);
+    // Sixteen CPUs, with CPU n and n + 8 the two threads of one core.
+    context.cpus = crate::host::stand_in::fake_cpus(&scratch, "cpus", &[32768; 16]);
+    let machine = Machine {
+        cores: 4,
+        pin_cpus: "0-3".to_owned(),
+        pin_vcpus: true,
+        emulator_cpus: "6,7".to_owned(),
+        ..Machine::new("w", "W", "/d", "/v")
+    };
+    let plan = plan_for(&context, &machine, Boot::Gpu);
+    assert_eq!(plan.pin.as_deref(), Some("0-3,8-11"), "each core's other thread goes with it");
+    let pins = plan.thread_pins.expect("pinned one by one");
+    assert_eq!(pins.vcpus, vec![0, 8, 1, 9], "four vCPUs on two cores, siblings together");
+    assert_eq!(pins.emulator, vec![6, 7]);
+    let off = plan_for(&context, &Machine { pin_vcpus: false, ..machine.clone() }, Boot::Gpu);
+    assert_eq!(off.thread_pins, None, "only when asked for");
+    let none = plan_for(&context, &Machine { pin_cpus: String::new(), ..machine }, Boot::Gpu);
+    assert_eq!((none.pin, none.thread_pins), (None, None), "with no CPUs there is nothing to pin to");
+}

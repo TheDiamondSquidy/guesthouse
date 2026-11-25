@@ -305,6 +305,18 @@ pub struct Machine {
     /// can still read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pin_cpus: String,
+    /// Pins each vCPU to a CPU of its own, from `pin_cpus` or the V-Cache cores, instead of leaving the
+    /// scheduler to move them between those. Left out of the file when off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pin_vcpus: bool,
+    /// The host CPUs for the threads of QEMU that aren't vCPUs, as taskset takes them. Only used with
+    /// `pin_vcpus`. Empty leaves them on the machine's CPUs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub emulator_cpus: String,
+    /// Starts the guest's CPU with the host's invariant TSC and cache sizes, as a hand-written libvirt
+    /// domain with `cache mode="passthrough"` does. Windows machines only. Left out of the file when off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cpu_tuning: bool,
 }
 
 impl Machine {
@@ -363,6 +375,9 @@ impl Machine {
             auto_snapshot: None,
             throwaway: false,
             pin_cpus: String::new(),
+            pin_vcpus: false,
+            emulator_cpus: String::new(),
+            cpu_tuning: false,
         }
     }
 
@@ -594,6 +609,9 @@ impl Machine {
         }
         if let Err(why) = crate::host::parse_cpu_list(&self.pin_cpus) {
             found.push(format!("The CPUs for the machine: {why}"));
+        }
+        if let Err(why) = crate::host::parse_cpu_list(&self.emulator_cpus) {
+            found.push(format!("The CPUs for the emulator: {why}"));
         }
         found
     }

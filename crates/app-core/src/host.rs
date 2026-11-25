@@ -144,6 +144,20 @@ pub fn physical_core_groups(root: &Path) -> Vec<Vec<u32>> {
     groups
 }
 
+/// These CPUs in the order the guest's vCPUs should take them: each core's threads together, cores in
+/// order, so that two vCPUs the guest sees as one core land on the two threads of one host core. A CPU no
+/// core lists comes last.
+pub fn pin_order(root: &Path, cpus: &[u32]) -> Vec<u32> {
+    let wanted: BTreeSet<u32> = cpus.iter().copied().collect();
+    let mut order: Vec<u32> = Vec::new();
+    for group in physical_core_groups(root) {
+        order.extend(group.into_iter().filter(|cpu| wanted.contains(cpu)));
+    }
+    let placed: BTreeSet<u32> = order.iter().copied().collect();
+    order.extend(wanted.difference(&placed));
+    order
+}
+
 /// The most threads any core has: 2 with hyperthreading, else 1. On a hybrid CPU the P-cores set it.
 pub fn smt_threads(root: &Path) -> u32 {
     physical_core_groups(root).iter().map(|group| group.len() as u32).max().unwrap_or(1).max(1)
@@ -452,6 +466,17 @@ mod tests {
         assert_eq!(smp_topology(&root, 4), "4,sockets=1,cores=2,threads=2");
         assert_eq!(smp_topology(&root, 7), "7,sockets=1,cores=7", "an odd count has no whole cores");
         assert_eq!(smp_topology(&root, 1), "1,sockets=1,cores=1");
+    }
+
+    #[test]
+    fn vcpus_take_cpus_a_core_at_a_time() {
+        let scratch = Scratch::new();
+        // CPU n and n + 4 are siblings, so sorted numbers would split every core.
+        let root = fake_cpus(&scratch, "order", &[32768; 8]);
+        assert_eq!(pin_order(&root, &[0, 1, 2, 3, 4, 5, 6, 7]), vec![0, 4, 1, 5, 2, 6, 3, 7]);
+        assert_eq!(pin_order(&root, &[5, 1]), vec![1, 5], "only the CPUs asked for");
+        assert_eq!(pin_order(&root, &[9, 2, 6]), vec![2, 6, 9], "a CPU no core lists is last");
+        assert!(pin_order(&root, &[]).is_empty());
     }
 
     #[test]

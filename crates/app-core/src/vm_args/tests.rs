@@ -328,6 +328,26 @@ fn a_tpm_brings_its_firmware_and_hides_nested_virtualization() {
 }
 
 #[test]
+fn cpu_tuning_asks_for_the_invariant_tsc_and_the_hosts_cache_sizes_and_nothing_else_moves() {
+    let (_scratch, untuned) = plan(&windows(), Boot::Gpu);
+    assert!(!value_after(&untuned.qemu_arguments(), "-cpu").contains("invtsc"), "off by default");
+    let (_scratch, tpm_only) = plan(&Machine { tpm: true, ..windows() }, Boot::Gpu);
+    let (_scratch, tuned) = plan(&Machine { cpu_tuning: true, tpm: true, ..windows() }, Boot::Gpu);
+    let (before, after) = (tpm_only.qemu_arguments(), tuned.qemu_arguments());
+    let cpu = value_after(&after, "-cpu");
+    assert!(cpu.starts_with("host,migratable=off,+invtsc,host-cache-info=on,hv-relaxed,"), "{cpu}");
+    assert!(cpu.ends_with(",-svm,-vmx"), "nested virtualization is still hidden: {cpu}");
+    let others = |words: &[String]| -> Vec<String> {
+        words
+            .iter()
+            .filter(|word| !word.starts_with("host,") && !word.contains("guesthouse-test-"))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(&after), others(&before), "only the -cpu words differ");
+}
+
+#[test]
 fn with_no_tpm_there_is_none_of_that() {
     let (_scratch, plan) = plan(&windows(), Boot::Gpu);
     let arguments = plan.qemu_arguments();

@@ -88,6 +88,7 @@ pub mod tasks;
 #[doc(hidden)]
 pub mod testing;
 pub mod text;
+pub mod thread_pins;
 pub mod throwaway;
 pub mod token_change;
 pub mod updates;
