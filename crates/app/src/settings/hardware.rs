@@ -4,7 +4,9 @@
 use super::{Shared, is_off};
 use crate::rows::{explain, number_row};
 use adw::prelude::*;
-use guesthouse_app_core::host::{cpu_list, cpus_present, parse_cpu_list, physical_cores, vcache_cpus};
+use guesthouse_app_core::host::{
+    cpu_list, cpus_present, expand_to_siblings, parse_cpu_list, physical_cores, smt_threads, vcache_cpus,
+};
 use guesthouse_app_core::limits::{cores_range, ram_field};
 use guesthouse_app_core::machine::Kind;
 use guesthouse_app_core::settings::max_vram_gib_for;
@@ -48,9 +50,17 @@ impl Hardware {
         let context = shared.window.context();
         let machine = shared.machine.borrow().clone();
         let host_cores = physical_cores(&context.cpus);
+        let threads = smt_threads(&context.cpus);
         let (least_cores, most_cores) = cores_range(&context, &machine);
         let cores = number_row("Cores", machine.cores.into(), least_cores.into(), most_cores.into());
-        cores.set_subtitle(&format!("This PC has {host_cores}"));
+        cores.set_subtitle(&if threads > 1 {
+            format!("This PC has {host_cores}, most with {threads} threads")
+        } else {
+            format!("This PC has {host_cores}")
+        });
+        if threads > 1 {
+            explain(&cores, &format!("A multiple of {threads} gives the guest matching cores and threads."));
+        }
         group.add(&cores);
         let wanted = machine.ram_gib.into();
         let field = ram_field(&context, &machine);
@@ -82,7 +92,8 @@ impl Hardware {
             .build();
         chosen.set_tooltip_text(Some(&format!(
             "The CPUs this PC lists are {}. The VM only runs on the ones you choose, and they replace \
-             V-Cache pinning. Choose at least as many as the machine has cores. `lscpu --extended` in a \
+             V-Cache pinning. Choose at least as many as the machine has cores. A core's other thread is \
+             added to any you choose, so the host never shares a core with the VM. `lscpu --extended` in a \
              terminal shows which CPUs share a core.",
             cpu_list(&cpus_present(&context.cpus))
         )));
@@ -160,8 +171,10 @@ impl Hardware {
                 row.set_tooltip_text(Some(&problem));
                 return;
             }
-            // Saved the way taskset takes it, so `4,0-2` reads back as `0-2,4`.
-            let text = cpu_list(&parse_cpu_list(&row.text()).unwrap_or_default());
+            // Saved the way taskset takes it, so `4,0-2` reads back as `0-2,4`, with each core's other
+            // thread added, as the VM is started on them.
+            let chosen = parse_cpu_list(&row.text()).unwrap_or_default();
+            let text = cpu_list(&expand_to_siblings(&saving.window.context().cpus, &chosen));
             row.set_text(&text);
             saving.machine.borrow_mut().pin_cpus = text;
             saving.save();

@@ -148,6 +148,8 @@ pub struct VmPlan {
     /// switched on has one: with it off, QEMU gets the same words it always did.
     pub app_windows_port: Option<u16>,
     pub cores: u32,
+    /// QEMU's `-smp` words: with hyperthreading on the host, the guest's cores have its threads too.
+    pub smp: String,
     pub ram: String,
     pub screen: String,
     pub disk: String,
@@ -249,6 +251,7 @@ impl VmPlan {
             app_windows_port: crate::app_windows::is_on(context, machine)
                 .then(|| crate::app_windows::host_port(context, Some(slot))),
             cores: machine.cores,
+            smp: crate::host::smp_topology(&context.cpus, machine.cores),
             ram: format!("{}G", machine.ram_gib),
             // Its device takes any size, where the VGA only has the firmware's.
             screen: if machine.macos() || machine.android() {

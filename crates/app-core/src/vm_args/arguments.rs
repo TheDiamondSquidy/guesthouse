@@ -85,7 +85,7 @@ impl VmPlan {
             "-cpu",
             &format!("host,{hyperv}"),
             "-smp",
-            &format!("{0},sockets=1,cores={0}", self.cores),
+            &self.smp,
             "-m",
             &self.ram,
         ]);
