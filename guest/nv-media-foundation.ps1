@@ -8,7 +8,10 @@
 # sees the number Guesthouse gave the device. From the AddReg sections those name come the lines
 # under MediaFoundation\Transforms, the class entries of the transforms named there, and the switch
 # for hardware transforms. A line this can't read is said and left out. A value the registry already
-# has as the INF writes it stays, so a second run writes nothing, and nothing is ever removed.
+# has as the INF writes it stays, so a second run writes nothing. One that is there with other data
+# is written over with the INF's, so a transform's entries follow a changed driver. The switch is
+# the exception. It is Windows' own, and every maker's hardware transforms go by it, so a value of
+# it that someone set otherwise is said and left as it is. Nothing is ever removed.
 $store = Join-Path $env:windir 'System32\HostDriverStore\FileRepository\nv_dispi.inf_amd64_gpupv'
 $infName = 'nv_dispi.inf'
 # NVIDIA's PCI vendor number, as the INF's lines for its cards have it.
@@ -173,14 +176,16 @@ function Read-Registrations($lines, $folder, $card) {
     $found
 }
 
-# Says whether the registry has the entry as the INF writes it.
-function Test-Written($entry) {
+# What the registry has under the entry's name: 'same' when it's there as the INF writes it, 'other'
+# when it's of another kind or has other data, and 'none'.
+function Find-Entry($entry) {
     $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($entry.Key)
-    if (-not $key) { return $false }
+    if (-not $key) { return 'none' }
     try {
         $has = $key.GetValue($entry.Name, $null, 'DoNotExpandEnvironmentNames')
-        if ($null -eq $has -or $key.GetValueKind($entry.Name) -ne $entry.Kind) { return $false }
-        ($has -join ',') -eq ($entry.Value -join ',')
+        if ($null -eq $has) { return 'none' }
+        $same = $key.GetValueKind($entry.Name) -eq $entry.Kind -and ($has -join ',') -eq ($entry.Value -join ',')
+        if ($same) { 'same' } else { 'other' }
     } finally {
         $key.Close()
     }
@@ -199,27 +204,39 @@ function Write-Entry($entry) {
 }
 
 # Registers what the INF in $folder asks for the card $card, and says what it did. The last line
-# starts with 'kept' when everything was there, with 'registered' when something was written, with
-# 'nothing to register' for a driver whose INF has no transforms for the card, and with 'no
-# transforms registered' when the card isn't known or the INF doesn't list it.
+# starts with 'kept' when everything was there, with 'registered' when something was written, failed
+# or left as someone set it, with 'nothing to register' for a driver whose INF has no transforms for
+# the card, and with 'no transforms registered' when the card isn't known or the INF doesn't list it.
+# Once the INF was read, the last line ends with how long this took: the whole INF is read at every
+# start, and the start waits for it.
 function Register-Transforms($folder, $card) {
     if ($card -notmatch $deviceNumber) { return "no transforms registered: '$card' isn't a card's device number" }
     $inf = Join-Path $folder $infName
     if (-not (Test-Path -LiteralPath $inf)) { return "nothing to register: no $inf" }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     # An INF with no mark of its encoding is in the system's own, as Windows reads it.
     $found = Read-Registrations ([IO.File]::ReadAllLines($inf, [Text.Encoding]::Default)) $folder $card
-    if (-not $found.Listed) { return "no transforms registered: $inf doesn't list the card $card" }
+    if (-not $found.Listed) {
+        return "no transforms registered: $inf doesn't list the card $card, read in $($clock.ElapsedMilliseconds) ms"
+    }
     if (-not $found.Entries.Count -and -not $found.Skipped) {
-        return "nothing to register: $inf has no transforms for the card $card"
+        return "nothing to register: $inf has no transforms for the card $card, read in $($clock.ElapsedMilliseconds) ms"
     }
     foreach ($line in $found.Skipped) {
         "skipped a line that can't be read: $($line.Substring(0, [Math]::Min($line.Length, $shown)))"
     }
     $written = 0
     $failed = 0
+    $left = 0
     foreach ($entry in $found.Entries.Values) {
         try {
-            if (Test-Written $entry) { continue }
+            $has = Find-Entry $entry
+            if ($has -eq 'same') { continue }
+            if ($has -eq 'other' -and $entry.Key -match $switchKey) {
+                $left++
+                "left HKLM\$($entry.Key) $($entry.Name) as it is set, which isn't as the INF writes it"
+                continue
+            }
             Write-Entry $entry
             $written++
         } catch {
@@ -228,7 +245,10 @@ function Register-Transforms($folder, $card) {
         }
     }
     $all = "$($found.Entries.Count) values of $($found.Transforms.Count) transforms"
-    if ($written -or $failed) { "registered $written of $all, failed $failed" } else { "kept $all" }
+    if (-not ($written -or $failed -or $left)) { return "kept $all in $($clock.ElapsedMilliseconds) ms" }
+    $said = "registered $written of $all, failed $failed"
+    if ($left) { $said += ", left $left of the switch's as set" }
+    "$said, in $($clock.ElapsedMilliseconds) ms"
 }
 
 Register-Transforms $store $card
