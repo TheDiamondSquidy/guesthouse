@@ -1166,3 +1166,18 @@ fn a_start_with_the_switch_off_takes_no_snapshot() {
     assert!(crate::snapshots::list_snapshots(&context, &vm).is_empty());
     assert_eq!(status(&context, &vm).restore_point, None);
 }
+
+#[test]
+fn a_machine_that_may_have_the_whole_card_is_started_with_it_as_its_cap() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    let setup = serde_json::json!({ crate::settings::CARD_MEMORY_FIELD: 8 * 1024 });
+    crate::settings::write_setup(&context, setup.as_object().unwrap().clone()).unwrap();
+    let vram = |machine: &Machine| plan_for(&context, machine, Boot::Gpu).vram;
+    let mut machine = Machine::new("w", "W", "/d", "/v");
+    assert_eq!(vram(&machine), None, "no cap: the daemon keeps the host's share");
+    machine.vram_whole_card = true;
+    assert_eq!(vram(&machine), Some("8G".to_owned()), "no cap, whole card");
+    machine.vram_gib = 5;
+    assert_eq!(vram(&machine), Some("5G".to_owned()), "its own cap is as typed");
+}
