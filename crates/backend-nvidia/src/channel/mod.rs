@@ -615,6 +615,21 @@ fn graphics_subchannels(generation: &Generation) -> u8 {
     (0..generation.graphics_classes.len()).fold(0, |all, subchannel| all | 1 << subchannel)
 }
 
+/// Whether a channel on a compute seat gets an object of this class: the compute class alone, and
+/// the deferred API, which draws nothing.
+fn on_compute_seat(generation: &Generation, class: u32) -> bool {
+    class == generation.compute_class || class == DEFERRED_API
+}
+
+/// The subchannels a channel on a compute seat has no object on, as a bit each. Commands for one
+/// would fault there, so a queue whose commands use one doesn't get a compute seat.
+pub fn compute_seat_missing(generation: &Generation) -> u8 {
+    let kept = (0..).zip(generation.graphics_classes).fold(0u8, |kept, (subchannel, (class, _))| {
+        if on_compute_seat(generation, *class) { kept | 1 << subchannel } else { kept }
+    });
+    graphics_subchannels(generation) & !kept
+}
+
 /// A class for a channel, with the subchannel the guest's commands reach it on and its parameters.
 type SubchannelClass = (u32, u32, Vec<u8>);
 
@@ -738,7 +753,7 @@ impl Seated {
         made.push(channel);
 
         // Each class keeps the subchannel the guest's commands assume, whatever is left out.
-        let kept = |class: u32| !computes_only || class == generation.compute_class || class == DEFERRED_API;
+        let kept = |class: u32| !computes_only || on_compute_seat(generation, class);
         let mut classes: Vec<SubchannelClass> = (0..)
             .zip(generation.graphics_classes)
             .filter(|(_, (class, _))| kept(*class))
@@ -815,7 +830,7 @@ fn map_doorbell_once<R: Rm>(device: &mut Device<R>, generation: &Generation) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{BLACKWELL, HOST_615};
+    use crate::profile::{ADA, AMPERE, BLACKWELL, HOST_615, TURING};
     use crate::pushbuffer::RingEntry;
     use crate::rm::fake::{Call, FakeRm};
 
@@ -1167,6 +1182,22 @@ mod tests {
         assert_eq!(words.len(), 4);
         assert_eq!(compute.missing_objects(), Some(0b01_1101), "drawing, inline to memory, 2D and copy");
         assert!(compute.in_context_group());
+    }
+
+    #[test]
+    fn what_a_compute_seat_lacks_is_known_for_a_generation_before_any_channel_is_made() {
+        let (mut device, space) = device();
+        let compute = seated(&mut device, &space, 0, COMPUTE_SEAT);
+        assert_eq!(compute_seat_missing(&BLACKWELL), compute.missing_objects().unwrap());
+        for generation in [&BLACKWELL, &ADA, &AMPERE, &TURING] {
+            let missing = compute_seat_missing(generation);
+            for (subchannel, (class, _)) in generation.graphics_classes.iter().enumerate() {
+                let lacks = *class != generation.compute_class && *class != DEFERRED_API;
+                assert_eq!(missing & 1 << subchannel != 0, lacks, "{} class {class:#x}", generation.name);
+            }
+            assert_eq!(missing & 1 << COPY_SUBCHANNEL, 1 << COPY_SUBCHANNEL, "{}: copy", generation.name);
+            assert_eq!(missing & 1 << COMPUTE_SUBCHANNEL, 0, "{}: compute", generation.name);
+        }
     }
 
     #[test]

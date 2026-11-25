@@ -387,6 +387,19 @@ impl<R: Rm> NvidiaBackend<R> {
         listing
     }
 
+    /// What a queue's first submission uses, read before its channel is made, from the ring where
+    /// the guest wrote it.
+    fn first_commands(
+        host: &dyn HostServices,
+        work: &Work<'_>,
+        ring_address: u64,
+        entries: u32,
+        end: u32,
+    ) -> SubchannelUse {
+        let listing = Self::ring_listing(host, work.space, ring_address, entries, end);
+        SubchannelUse::of_listing(host, work.space, &listing)
+    }
+
     /// A pool for a queue's graphics channel that was made before the window was known. It runs
     /// ahead of the queue's next submission. A queue that named its own pool keeps it.
     fn give_late_local_memory(&mut self, host: &mut dyn HostServices, queue_id: u32) {
@@ -427,7 +440,13 @@ impl<R: Rm> NvidiaBackend<R> {
 
     /// The queue's channel on a guest's ring, made the first time. `first` is where this
     /// submission starts, and the entry before it is free for the prelude.
-    fn ring_channel(&mut self, host: &mut dyn HostServices, work: &Work<'_>, ring_address: u64, first: u32) {
+    fn ring_channel(
+        &mut self,
+        host: &mut dyn HostServices,
+        work: &Work<'_>,
+        ring_address: u64,
+        (first, entries, end): (u32, u32, u32),
+    ) {
         let queue = self.queues.entry(work.queue).or_insert_with(|| LiveQueue::new(work.space));
         if std::mem::replace(&mut queue.channel_tried, true) {
             return;
@@ -451,7 +470,25 @@ impl<R: Rm> NvidiaBackend<R> {
         let engine = self.video_engine(work).map_or(Engine::Graphics, Engine::Video);
         let local_memory = self.local_memory_place(host, engine);
         let Some(space) = self.spaces.get(&work.space) else { return };
-        let seat = self.seat_for(work, engine);
+        let seat = self.seat_for(work, engine).filter(|seat| {
+            let Seat::Compute { .. } = seat else { return true };
+            // A queue's channel is made with its first submission, so those commands show what the
+            // queue needs. One that needs an object a compute seat lacks, a copy for a Direct3D 12
+            // compute queue, can't sit there, and keeps a group of its own as if the layout left it out.
+            let missing = crate::channel::compute_seat_missing(self.generation);
+            let found = Self::first_commands(host, work, ring_address, entries, end);
+            if !found.needs(missing) {
+                return true;
+            }
+            log::info!(
+                "queue {:#x} is placed on {seat:?}, but its first commands use subchannels {:#04b} and the \
+                 seat has no object on {:#04b}, so it gets a group of its own",
+                work.queue,
+                found.used,
+                found.used & missing
+            );
+            false
+        });
         if seat.is_none()
             && self.device.context_groups.enabled
             && engine == Engine::Graphics
@@ -629,7 +666,7 @@ impl<R: Rm> NvidiaBackend<R> {
             self.watch_local_window(host, work, &listing);
             self.watch_guest_pool(host, work, &listing);
         }
-        self.ring_channel(host, work, ring_address, first);
+        self.ring_channel(host, work, ring_address, (first, entries, end));
         self.give_late_local_memory(host, work.queue);
         self.give_guest_pool(work);
         if let Some(old_ring) = self.queue_ring(work.queue).filter(|known| *known != ring_address) {
@@ -1945,6 +1982,60 @@ mod tests {
             assert!(matches!(lab.submit(3, CONTEXT, 3, &compute_work()), WorkStart::Started { .. }));
             assert!(lab.channel(3).in_context_group());
             assert_eq!(lab.slices(), 3);
+        }
+
+        /// What a Direct3D 12 compute queue's first submission can hold: compute work, and a copy.
+        fn compute_and_copy_work() -> [u32; 4] {
+            [increasing(1, 0x2B4, 1), 0, increasing(4, 0x300, 1), 0]
+        }
+
+        #[test]
+        fn a_compute_queue_whose_first_commands_copy_keeps_a_group_of_its_own() {
+            let mut lab = Lab::new(true);
+            lab.queue(1, Some(DRAWS));
+            lab.queue(2, Some(COMPUTES));
+            lab.submit(1, CONTEXT, 3, &drawing_work());
+            let before = lab.groups_made();
+            assert!(matches!(lab.submit(2, CONTEXT, 3, &compute_and_copy_work()), WorkStart::Started { .. }));
+            assert_eq!(lab.groups_made() - before, 1, "a group of its own");
+            assert_eq!(lab.backend.device.context_groups.members(CONTEXT), 1);
+            assert!(!lab.channel(2).in_context_group());
+            assert_eq!(lab.channel(2).missing_objects(), None, "with every class, as before");
+            assert_eq!(lab.slices(), 2, "and the shared slice, as the group it left out now has too");
+            // It runs whatever the guest records on it next.
+            assert!(matches!(lab.submit(2, CONTEXT, 3, &copy_work()), WorkStart::Started { .. }));
+            assert!(matches!(lab.submit(2, CONTEXT, 3, &drawing_work()), WorkStart::Started { .. }));
+            // A queue that computes alone is seated beside it all the same.
+            lab.queue(3, Some(COMPUTES + 1));
+            assert!(matches!(lab.submit(3, CONTEXT, 3, &compute_work()), WorkStart::Started { .. }));
+            assert!(lab.channel(3).in_context_group());
+            assert_eq!(lab.backend.device.context_groups.members(CONTEXT), 2);
+        }
+
+        #[test]
+        fn a_compute_queue_whose_first_commands_draw_keeps_a_group_of_its_own() {
+            let mut lab = Lab::new(true);
+            lab.queue(1, Some(DRAWS));
+            lab.queue(2, Some(COMPUTES));
+            lab.submit(1, CONTEXT, 2, &drawing_work());
+            assert!(matches!(lab.submit(2, CONTEXT, 2, &drawing_work()), WorkStart::Started { .. }));
+            assert!(!lab.channel(2).in_context_group());
+            assert_eq!(lab.backend.device.context_groups.members(CONTEXT), 1);
+        }
+
+        #[test]
+        fn a_compute_queue_whose_first_commands_need_nothing_it_lacks_keeps_its_seat() {
+            let mut lab = Lab::new(true);
+            lab.queue(1, Some(DRAWS));
+            lab.queue(2, Some(COMPUTES));
+            lab.queue(3, Some(COMPUTES + 1));
+            lab.submit(1, CONTEXT, 3, &drawing_work());
+            // Compute, and a subchannel no graphics channel has an object on.
+            let software = [increasing(1, 0x2B4, 1), 0, increasing(6, 0x100, 1), 0];
+            assert!(matches!(lab.submit(2, CONTEXT, 3, &software), WorkStart::Started { .. }));
+            assert!(matches!(lab.submit(3, CONTEXT, 3, &compute_work()), WorkStart::Started { .. }));
+            assert!(lab.channel(2).in_context_group() && lab.channel(3).in_context_group());
+            assert_eq!(lab.backend.device.context_groups.members(CONTEXT), 3);
         }
 
         #[test]
